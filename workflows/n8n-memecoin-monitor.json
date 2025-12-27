@@ -1,0 +1,170 @@
+{
+  "name": "Memecoin High Score Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 2
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Cron Trigger (Every 2 minutes)",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT ON (a.coin_id) a.id, a.coin_id, a.overall_score, a.price_score, a.volume_score, a.social_score, a.risk_score, a.created_at, a.metrics::jsonb->>'riskLevel' as risk_level, a.metrics::jsonb->'riskReasons' as risk_reasons, c.address, c.symbol, c.name, c.chain_id, c.liquidity, COALESCE((c.raw_data->'volume'->>'h24')::numeric, 0) as volume24h FROM analyses a INNER JOIN coins c ON a.coin_id = c.id WHERE a.created_at >= NOW() - INTERVAL '2 minutes' AND c.address IS NOT NULL AND c.symbol IS NOT NULL AND a.overall_score IS NOT NULL AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.coin_id = a.coin_id AND n.sent_at >= NOW() - INTERVAL '1 hour') ORDER BY a.coin_id, a.created_at DESC LIMIT 10",
+        "options": {}
+      },
+      "id": "query-db",
+      "name": "Query Recent High Score Coins",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-credential",
+          "name": "PostgreSQL Memecoin DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-results",
+              "leftValue": "={{ $input.all().length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-condition",
+      "name": "Check If Any High Score Coins",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format message for each high score coin\nconst items = $input.all();\n\nif (items.length === 0) {\n  return { json: { message: '', count: 0 } };\n}\n\nconst messages = items.map(item => {\n  const data = item.json;\n  const symbol = data.symbol || 'N/A';\n  const name = data.name || 'Unknown';\n  const overallScore = data.overall_score || 0;\n  const priceScore = data.price_score || 0;\n  const volumeScore = data.volume_score || 0;\n  const socialScore = data.social_score || 0;\n  const riskScore = data.risk_score || 0;\n  const chainId = data.chain_id || 'N/A';\n  const address = data.address || 'N/A';\n  const liquidity = data.liquidity ? parseFloat(data.liquidity).toLocaleString('en-US') : 'N/A';\n  const volume24h = data.volume24h ? parseFloat(data.volume24h).toLocaleString('en-US') : 'N/A';\n  \n  // Extract risk level and reasons from metrics\n  let riskLevel = data.risk_level || null;\n  let riskReasons = [];\n  if (data.risk_reasons && Array.isArray(data.risk_reasons)) {\n    riskReasons = data.risk_reasons;\n  }\n  \n  // Format risk level with emoji\n  // If riskLevel is null/empty, determine from risk_score\n  let riskLevelEmoji = '⚠️';\n  let riskLevelText = 'UNKNOWN';\n  \n  if (riskLevel && riskLevel !== '') {\n    riskLevelText = riskLevel.toUpperCase();\n    if (riskLevel === 'low') {\n      riskLevelEmoji = '✅';\n    } else if (riskLevel === 'medium') {\n      riskLevelEmoji = '⚠️';\n    } else if (riskLevel === 'high') {\n      riskLevelEmoji = '🔴';\n    }\n  } else {\n    // Fallback: determine from risk_score if riskLevel not available\n    if (riskScore >= 70) {\n      riskLevelText = 'LOW';\n      riskLevelEmoji = '✅';\n    } else if (riskScore >= 40) {\n      riskLevelText = 'MEDIUM';\n      riskLevelEmoji = '⚠️';\n    } else if (riskScore >= 0) {\n      riskLevelText = 'HIGH';\n      riskLevelEmoji = '🔴';\n    }\n  }\n  \n  // Build risk reasons text\n  let riskReasonsText = '';\n  if (riskReasons.length > 0) {\n    riskReasonsText = '\\n⚠️ Risk Reasons:\\n' + riskReasons.map((reason, idx) => `  ${idx + 1}. ${reason}`).join('\\n');\n  }\n  \n  return `🎯 *${symbol}* (${name})\\n` +\n    `⭐ Overall Score: ${overallScore}/100\\n` +\n    `💰 Price: ${priceScore}/100 | 📊 Volume: ${volumeScore}/100\\n` +\n    `👥 Social: ${socialScore}/100 | ⚠️ Risk Score: ${riskScore}/100\\n` +\n    `${riskLevelEmoji} Risk Level: ${riskLevelText}${riskReasonsText}\\n` +\n    `🔗 Chain: ${chainId}\\n` +\n    `📍 Address: \\`${address}\\`\\n` +\n    `💵 Liquidity: $${liquidity}\\n` +\n    `📈 24h Volume: $${volume24h}\\n` +\n    `---`;\n});\n\nconst fullMessage = `🚀 *MEMECOIN ALERT!*\\n\\n${messages.join('\\n\\n')}`;\n\nreturn { json: { message: fullMessage, count: items.length } };"
+      },
+      "id": "format-message",
+      "name": "Format Telegram Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 220]
+    },
+    {
+      "parameters": {
+        "chatId": "",
+        "text": "={{ $json.message }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "send-telegram",
+      "name": "Send Telegram Notification",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [1120, 220],
+      "credentials": {
+        "telegramApi": {
+          "id": "telegram-credential",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "log-no-results",
+      "name": "Log No Results",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [900, 380]
+    }
+  ],
+  "connections": {
+    "Cron Trigger (Every 2 minutes)": {
+      "main": [
+        [
+          {
+            "node": "Query Recent High Score Coins",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Recent High Score Coins": {
+      "main": [
+        [
+          {
+            "node": "Check If Any High Score Coins",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check If Any High Score Coins": {
+      "main": [
+        [
+          {
+            "node": "Format Telegram Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log No Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Telegram Message": {
+      "main": [
+        [
+          {
+            "node": "Send Telegram Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "updatedAt": "2024-12-26T00:00:00.000Z",
+  "versionId": "1"
+}
+

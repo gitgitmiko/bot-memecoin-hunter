@@ -1,0 +1,214 @@
+{
+  "name": "Memecoin High Score Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Every 30 Minutes",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT ON (a.coin_id) a.id, a.coin_id, a.overall_score, a.price_score, a.volume_score, a.social_score, a.risk_score, a.created_at, a.metrics::jsonb->>'riskLevel' as risk_level, a.metrics::jsonb->'riskReasons' as risk_reasons, c.address, c.symbol, c.name, c.chain_id, c.liquidity, COALESCE((c.raw_data->'volume'->>'h24')::numeric, 0) as volume24h FROM analyses a INNER JOIN coins c ON a.coin_id = c.id WHERE a.created_at >= NOW() - INTERVAL '30 minutes' AND c.address IS NOT NULL AND c.symbol IS NOT NULL AND a.overall_score IS NOT NULL AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.coin_id = a.coin_id AND n.sent_at >= NOW() - INTERVAL '1 hour') ORDER BY a.coin_id, a.created_at DESC LIMIT 10",
+        "options": {}
+      },
+      "id": "query-db",
+      "name": "Query High Score Coins",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "Memecoin PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-results",
+              "leftValue": "={{ $input.all().filter(item => item.json && item.json.address && item.json.overall_score && item.json.overall_score > 0).length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-condition",
+      "name": "Has Results?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format message for each high score coin\n// Only send notification if there is valid data\nconst items = $input.all();\n\n// If no items, return empty message\nif (!items || items.length === 0) {\n  return { json: { message: '', count: 0, hasMessage: false, shouldSend: false } };\n}\n\n// Filter and validate items - only include items with complete data\nconst validItems = items.filter(item => {\n  const data = item.json;\n  // Must have: address, overall_score, and at least one score > 0\n  return data && \n         data.address && \n         data.address !== 'N/A' &&\n         data.overall_score !== null && \n         data.overall_score !== undefined &&\n         data.overall_score > 0;\n});\n\n// If no valid items after filtering, don't send\nif (validItems.length === 0) {\n  return { json: { message: '', count: 0, hasMessage: false, shouldSend: false } };\n}\n\n// Format messages only for valid items\nconst messages = validItems.map(item => {\n  const data = item.json;\n  \n  const symbol = data.symbol && data.symbol !== 'N/A' ? data.symbol : 'Unknown';\n  const name = data.name && data.name !== 'Unknown' ? data.name : symbol;\n  const overallScore = data.overall_score || 0;\n  const priceScore = data.price_score || 0;\n  const volumeScore = data.volume_score || 0;\n  const socialScore = data.social_score || 0;\n  const riskScore = data.risk_score || 0;\n  const chainId = data.chain_id || 'N/A';\n  const address = data.address || 'N/A';\n  \n  // Extract risk level and reasons from metrics\n  let riskLevel = data.risk_level || null;\n  let riskReasons = [];\n  if (data.risk_reasons && Array.isArray(data.risk_reasons)) {\n    riskReasons = data.risk_reasons;\n  }\n  \n  // Format risk level with emoji\n  // If riskLevel is null/empty, determine from risk_score\n  let riskLevelEmoji = '⚠️';\n  let riskLevelText = 'UNKNOWN';\n  \n  if (riskLevel && riskLevel !== '') {\n    riskLevelText = riskLevel.toUpperCase();\n    if (riskLevel === 'low') {\n      riskLevelEmoji = '✅';\n    } else if (riskLevel === 'medium') {\n      riskLevelEmoji = '⚠️';\n    } else if (riskLevel === 'high') {\n      riskLevelEmoji = '🔴';\n    }\n  } else {\n    // Fallback: determine from risk_score if riskLevel not available\n    if (riskScore >= 70) {\n      riskLevelText = 'LOW';\n      riskLevelEmoji = '✅';\n    } else if (riskScore >= 40) {\n      riskLevelText = 'MEDIUM';\n      riskLevelEmoji = '⚠️';\n    } else if (riskScore >= 0) {\n      riskLevelText = 'HIGH';\n      riskLevelEmoji = '🔴';\n    }\n  }\n  \n  // Format liquidity and volume - only show if valid numbers\n  let liquidityStr = 'N/A';\n  if (data.liquidity && !isNaN(parseFloat(data.liquidity)) && parseFloat(data.liquidity) > 0) {\n    liquidityStr = '$' + parseFloat(data.liquidity).toLocaleString('en-US');\n  }\n  \n  let volume24hStr = 'N/A';\n  if (data.volume24h && !isNaN(parseFloat(data.volume24h)) && parseFloat(data.volume24h) > 0) {\n    volume24hStr = '$' + parseFloat(data.volume24h).toLocaleString('en-US');\n  }\n  \n  // Build risk reasons text\n  let riskReasonsText = '';\n  if (riskReasons.length > 0) {\n    riskReasonsText = '\\n⚠️ Risk Reasons:\\n' + riskReasons.map((reason, idx) => `  ${idx + 1}. ${reason}`).join('\\n');\n  }\n  \n  return `🎯 *${symbol}* (${name})\\n` +\n    `⭐ Overall Score: ${overallScore}/100\\n` +\n    `💰 Price: ${priceScore}/100 | 📊 Volume: ${volumeScore}/100\\n` +\n    `👥 Social: ${socialScore}/100 | ⚠️ Risk Score: ${riskScore}/100\\n` +\n    `${riskLevelEmoji} Risk Level: ${riskLevelText}${riskReasonsText}\\n` +\n    `🔗 Chain: ${chainId}\\n` +\n    `📍 Address: \\`${address}\\`\\n` +\n    `💵 Liquidity: ${liquidityStr}\\n` +\n    `📈 24h Volume: ${volume24hStr}\\n` +\n    `---`;\n});\n\n// If no valid messages after formatting, don't send\nif (messages.length === 0) {\n  return { json: { message: '', count: 0, hasMessage: false, shouldSend: false } };\n}\n\nconst fullMessage = `🚀 *MEMECOIN ALERT!*\\n\\n${messages.join('\\n\\n')}`;\n\n// Validate message length (Telegram limit is 4096 characters)\nconst maxLength = 4000; // Leave some buffer\nif (fullMessage.length > maxLength) {\n  // Truncate to fit\n  const truncated = fullMessage.substring(0, maxLength - 10) + '\\n...';\n  return { json: { message: truncated, count: messages.length, hasMessage: true, shouldSend: true } };\n}\n\n// Return message with coin_ids for tracking\nreturn { \n  json: { \n    message: fullMessage, \n    count: messages.length, \n    hasMessage: true, \n    shouldSend: true,\n    coin_ids: validItems.map(item => item.json.coin_id)\n  } \n};"
+      },
+      "id": "format-message",
+      "name": "Format Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 220]
+    },
+    {
+      "parameters": {
+        "chatId": "",
+        "text": "={{ $json.shouldSend && $json.message && $json.message.trim().length > 0 ? $json.message : '' }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "send-telegram",
+      "name": "Send Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [1120, 220],
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "Telegram Bot"
+        }
+      },
+      "notes": "⚠️ If connection timeout occurs, enable 'Retry on Fail' in node settings (⚙️ icon)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare notifications data for each coin_id\n// Get data directly from Format Message node output\nconst formatMessageOutput = $input.first();\n\n// Get coin_ids and message from Format Message output\nconst coinIds = formatMessageOutput.json.coin_ids || [];\nconst message = formatMessageOutput.json.message || '';\n\nif (!coinIds || coinIds.length === 0) {\n  return { json: { saved: 0, message: 'No coin_ids to save' } };\n}\n\n// Escape single quotes for SQL (replace ' with '')\nconst escapedMessage = message.substring(0, 1000).replace(/'/g, \"''\");\n\n// Return array of objects for PostgreSQL insert\nreturn coinIds.map(coinId => ({\n  json: {\n    coin_id: coinId,\n    message_text: escapedMessage,\n    status: 'sent'\n  }\n}));"
+      },
+      "id": "prepare-notifications",
+      "name": "Prepare Notifications",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 220]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO notifications (coin_id, message_text, sent_at, status) VALUES ({{ $json.coin_id }}, '{{ $json.message_text }}', NOW(), '{{ $json.status }}')",
+        "options": {}
+      },
+      "id": "save-notification",
+      "name": "Save Notification",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [1560, 220],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "Memecoin PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "log-skip",
+      "name": "Skip (No Results)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [900, 380]
+    }
+  ],
+  "connections": {
+    "Every 2 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Query High Score Coins",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query High Score Coins": {
+      "main": [
+        [
+          {
+            "node": "Has Results?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Results?": {
+      "main": [
+        [
+          {
+            "node": "Format Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Skip (No Results)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Message": {
+      "main": [
+        [
+          {
+            "node": "Send Telegram",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Notifications": {
+      "main": [
+        [
+          {
+            "node": "Save Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "updatedAt": "2024-12-26T00:00:00.000Z",
+  "versionId": "1"
+}
