@@ -5,7 +5,9 @@ import { testConnection } from './config/database';
 import { logger } from './config/logger';
 import { NotificationService } from './services/notification.service';
 import { DataService } from './services/data.service';
+import { TradingService } from './services/trading.service';
 import { REDIS_QUEUES } from './utils/constants';
+import { PositionStatus } from './services/position.service';
 
 dotenv.config();
 
@@ -17,6 +19,7 @@ class TelegramBotService {
   private bot: TelegramBot | null = null;
   private notificationService: NotificationService | null = null;
   private dataService: DataService = new DataService();
+  private tradingService: TradingService = new TradingService();
 
   /**
    * Initialize services
@@ -40,6 +43,14 @@ class TelegramBotService {
     // Initialize Redis
     await initRedis();
     logger.info('Redis connection established');
+
+    // Initialize trading service
+    try {
+      await this.tradingService.initialize();
+      logger.info('Trading service initialized');
+    } catch (error) {
+      logger.warn('Trading service initialization failed (will retry on command):', error);
+    }
 
     // Initialize Telegram bot with reduced polling frequency to avoid rate limiting
     // Polling interval: 5 seconds (default is 1-2 seconds)
@@ -87,6 +98,17 @@ I'll alert you when we discover high-scoring meme coins.
 /dbcoin &lt;address&gt; - 🪙 Get detailed coin information by address
 /dbhighscore [limit] - ⭐ List high score coins (score > 70, default: 10, max: 20)
 
+<b>Trading Commands:</b>
+/positions - 📊 List all open positions
+/buy &lt;token&gt; - 💰 Buy $10 of token
+/status &lt;token&gt; - 📈 Get position status
+/sell &lt;token&gt; - 💸 Force sell position
+/balance - 💵 Check wallet balance
+/pnl - 📊 Total profit & loss
+/checkcoin &lt;address&gt; - 🔍 Check if coin exists on DEX (BSC/Solana)
+/24h &lt;address&gt; - 📊 Get 24h timeframe analysis
+/infocoin &lt;address&gt; - ℹ️ Get coin information (website, social media, etc.)
+
 <i>Stay tuned for coin alerts! 📈</i>
       `.trim();
 
@@ -115,6 +137,17 @@ I'll alert you when we discover high-scoring meme coins.
 /dbnew [limit] - 🆕 List new coins ordered by discovered_at (default: 10, max: 20)
 /dbcoin &lt;address&gt; - 🪙 Get detailed coin information by address (Ethereum/Solana)
 /dbhighscore [limit] - ⭐ List coins with overall_score > 70 (default: 10, max: 20)
+
+<b>Trading Commands:</b>
+/positions - 📊 List all open positions
+/buy &lt;token_address&gt; - 💰 Buy $10 of token (BSC only)
+/status &lt;token_address&gt; - 📈 Get position status by token address
+/sell &lt;token_address&gt; - 💸 Force sell position
+/balance - 💵 Check wallet balance (BUSD & BNB)
+/pnl - 📊 Total profit & loss across all positions
+/checkcoin &lt;address&gt; - 🔍 Check if coin exists on DEX (BSC/Solana)
+/24h &lt;address&gt; - 📊 Get detailed 24h timeframe analysis
+/infocoin &lt;address&gt; - ℹ️ Get coin information from internet (website, X/Twitter, Telegram, etc.)
 
 <b>About:</b>
 This bot monitors new meme coins and alerts you when we find high-scoring opportunities.
@@ -455,6 +488,678 @@ ${stats.latestAnalysisDate ? `📊 <b>Latest Analysis:</b> ${new Date(stats.late
       } catch (error) {
         logger.error('Error getting dbhighscore:', error);
         this.bot!.sendMessage(chatId, '❌ Error getting high score coins. Please try again later.').catch(() => {});
+      }
+    });
+
+    // ============================================================================
+    // TRADING COMMANDS
+    // ============================================================================
+
+    // /positions command - List all positions
+    this.bot.onText(/\/positions/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        const positions = await this.tradingService.getPositions(PositionStatus.OPEN);
+        
+        if (positions.length === 0) {
+          this.bot!.sendMessage(chatId, '📭 No open positions found.').catch(() => {});
+          return;
+        }
+
+        let message = `📊 <b>Open Positions (${positions.length})</b>\n\n`;
+        
+        for (const pos of positions) {
+          const pnl = pos.currentPriceUsd && pos.buyPriceUsd 
+            ? ((pos.currentPriceUsd - pos.buyPriceUsd) / pos.buyPriceUsd) * 100
+            : 0;
+          const pnlSign = pnl >= 0 ? '📈' : '📉';
+          
+          message += `<b>${pos.symbol || 'N/A'}</b>\n`;
+          message += `📍 <code>${pos.tokenAddress}</code>\n`;
+          message += `💰 Buy: $${pos.buyPriceUsd.toFixed(8)}\n`;
+          message += `💵 Current: $${pos.currentPriceUsd?.toFixed(8) || 'N/A'}\n`;
+          message += `🔺 Highest: $${pos.highestPriceEver.toFixed(8)}\n`;
+          if (pos.profitFloor) {
+            message += `🛡️ Floor: $${pos.profitFloor.toFixed(8)}\n`;
+          }
+          message += `💎 Amount: ${parseFloat(pos.amountToken).toFixed(4)}\n`;
+          message += `${pnlSign} PnL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%\n`;
+          message += `\n`;
+        }
+
+        // Split if too long
+        if (message.length > 4000) {
+          const chunks = message.match(/[\s\S]{1,4000}/g) || [];
+          for (const chunk of chunks) {
+            await this.bot!.sendMessage(chatId, chunk, { parse_mode: 'HTML' }).catch(() => {});
+          }
+        } else {
+          this.bot!.sendMessage(chatId, message, { parse_mode: 'HTML' }).catch(() => {});
+        }
+      } catch (error: any) {
+        logger.error('Error getting positions:', error);
+        this.bot!.sendMessage(chatId, `❌ Error: ${error.message || 'Failed to get positions'}`).catch(() => {});
+      }
+    });
+
+    // /buy command - Buy token (supports address or symbol)
+    this.bot.onText(/\/buy\s+(.+)/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const input = match && match[1] ? match[1].trim() : '';
+      
+      if (!input) {
+        this.bot!.sendMessage(chatId, '❌ Please provide token address or symbol.\nUsage: /buy <token_address_or_symbol>').catch(() => {});
+        return;
+      }
+
+      try {
+        // Check if input is address (0x... with 40-42 hex chars) or symbol
+        let tokenAddress = input;
+        if (!input.startsWith('0x') || input.length < 40) {
+          // Try to find by symbol
+          this.bot!.sendMessage(chatId, `🔍 Looking up token address for symbol: ${input}...`).catch(() => {});
+          const foundAddress = await this.tradingService.findTokenAddressBySymbol(input, 56);
+          if (!foundAddress) {
+            this.bot!.sendMessage(chatId, `❌ Token "${input}" not found in database. Please use token address instead.\n\nUsage: /buy 0x1234...5678`).catch(() => {});
+            return;
+          }
+          tokenAddress = foundAddress;
+        }
+
+        // Validate address format
+        if (!tokenAddress.startsWith('0x') || tokenAddress.length !== 42) {
+          this.bot!.sendMessage(chatId, '❌ Invalid token address format. Must be 0x followed by 40 hex characters.').catch(() => {});
+          return;
+        }
+
+        this.bot!.sendMessage(chatId, `💰 Buying $10 of token...\n📍 Address: <code>${tokenAddress}</code>`, { parse_mode: 'HTML' }).catch(() => {});
+
+        const result = await this.tradingService.buy(tokenAddress, 10, 5);
+        
+        const successMessage = `✅ <b>Buy Successful!</b>\n\n` +
+          `📍 Token: <code>${tokenAddress}</code>\n` +
+          `💰 Amount: $10\n` +
+          `📊 Position ID: ${result.positionId}\n` +
+          `🔗 TX Hash: <code>${result.txHash}</code>\n\n` +
+          `Use /status ${tokenAddress} to check position status.`;
+        
+        this.bot!.sendMessage(chatId, successMessage, { parse_mode: 'HTML' }).catch(() => {});
+      } catch (error: any) {
+        logger.error('Error in buy command:', error);
+        this.bot!.sendMessage(
+          chatId,
+          `❌ Buy failed: ${error.message || 'Unknown error'}`
+        ).catch(() => {});
+      }
+    });
+
+    // /status command (enhanced) - Get position status by token
+    this.bot.onText(/\/status\s+([a-zA-Z0-9]{40,42})/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const tokenAddress = match && match[1] ? match[1] : '';
+      
+      if (!tokenAddress) {
+        this.bot!.sendMessage(chatId, '❌ Please provide token address.\nUsage: /status <token_address>').catch(() => {});
+        return;
+      }
+
+      try {
+        const position = await this.tradingService.getPositionByToken(tokenAddress);
+        
+        if (!position) {
+          this.bot!.sendMessage(chatId, `❌ No position found for token <code>${tokenAddress}</code>`, { parse_mode: 'HTML' }).catch(() => {});
+          return;
+        }
+
+        const pnl = position.currentPriceUsd && position.buyPriceUsd
+          ? ((position.currentPriceUsd - position.buyPriceUsd) / position.buyPriceUsd) * 100
+          : 0;
+        const pnlSign = pnl >= 0 ? '📈' : '📉';
+
+        const message = `📊 <b>Position Status</b>\n\n` +
+          `<b>${position.symbol || 'N/A'}</b>\n` +
+          `📍 Address: <code>${position.tokenAddress}</code>\n` +
+          `📊 Status: ${position.status}\n` +
+          `💰 Buy Price: $${position.buyPriceUsd.toFixed(8)}\n` +
+          `💵 Current: $${position.currentPriceUsd?.toFixed(8) || 'N/A'}\n` +
+          `🔺 Highest: $${position.highestPriceEver.toFixed(8)}\n` +
+          (position.profitFloor ? `🛡️ Floor: $${position.profitFloor.toFixed(8)}\n` : '') +
+          `💎 Amount: ${parseFloat(position.amountToken).toFixed(4)}\n` +
+          `${pnlSign} PnL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%\n` +
+          `📅 Created: ${position.createdAt ? new Date(position.createdAt).toLocaleString() : 'N/A'}`;
+
+        this.bot!.sendMessage(chatId, message, { parse_mode: 'HTML' }).catch(() => {});
+      } catch (error: any) {
+        logger.error('Error getting position status:', error);
+        this.bot!.sendMessage(chatId, `❌ Error: ${error.message || 'Failed to get status'}`).catch(() => {});
+      }
+    });
+
+    // /sell command - Sell position (supports address or symbol)
+    this.bot.onText(/\/sell\s+(.+)/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const input = match && match[1] ? match[1].trim() : '';
+      
+      if (!input) {
+        this.bot!.sendMessage(chatId, '❌ Please provide token address or symbol.\nUsage: /sell <token_address_or_symbol>').catch(() => {});
+        return;
+      }
+
+      try {
+        // Check if input is address (0x... with 40-42 hex chars) or symbol
+        let tokenAddress = input;
+        if (!input.startsWith('0x') || input.length < 40) {
+          // Try to find by symbol
+          this.bot!.sendMessage(chatId, `🔍 Looking up token address for symbol: ${input}...`).catch(() => {});
+          const foundAddress = await this.tradingService.findTokenAddressBySymbol(input, 56);
+          if (!foundAddress) {
+            this.bot!.sendMessage(chatId, `❌ Token "${input}" not found. Please use token address instead.\n\nUsage: /sell 0x1234...5678`).catch(() => {});
+            return;
+          }
+          tokenAddress = foundAddress;
+        }
+
+        // Validate address format
+        if (!tokenAddress.startsWith('0x') || tokenAddress.length !== 42) {
+          this.bot!.sendMessage(chatId, '❌ Invalid token address format. Must be 0x followed by 40 hex characters.').catch(() => {});
+          return;
+        }
+
+        this.bot!.sendMessage(chatId, `💸 Selling position for token...\n📍 Address: <code>${tokenAddress}</code>`, { parse_mode: 'HTML' }).catch(() => {});
+
+        const result = await this.tradingService.sellByToken(tokenAddress, 5);
+        
+        const successMessage = `✅ <b>Sell Successful!</b>\n\n` +
+          `📍 Token: <code>${tokenAddress}</code>\n` +
+          `💰 PnL: $${result.pnl >= 0 ? '+' : ''}${result.pnl.toFixed(2)}\n` +
+          `🔗 TX Hash: <code>${result.txHash}</code>\n\n` +
+          `Position has been closed.`;
+        
+        this.bot!.sendMessage(chatId, successMessage, { parse_mode: 'HTML' }).catch(() => {});
+      } catch (error: any) {
+        logger.error('Error in sell command:', error);
+        this.bot!.sendMessage(
+          chatId,
+          `❌ Sell failed: ${error.message || 'Unknown error'}`
+        ).catch(() => {});
+      }
+    });
+
+    // /balance command - Get wallet balance
+    this.bot.onText(/\/balance/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        const balance = await this.tradingService.getBalance();
+        const message = `💵 <b>Wallet Balance</b>\n\n` +
+          `💰 BUSD: ${parseFloat(balance.busd).toFixed(2)}\n` +
+          `⚡ BNB: ${parseFloat(balance.bnb).toFixed(4)}`;
+        
+        this.bot!.sendMessage(chatId, message, { parse_mode: 'HTML' }).catch(() => {});
+      } catch (error: any) {
+        logger.error('Error getting balance:', error);
+        this.bot!.sendMessage(
+          chatId,
+          `❌ Error getting balance: ${error.message}`
+        ).catch(() => {});
+      }
+    });
+
+    // /pnl command - Get total PnL
+    this.bot.onText(/\/pnl/, async (msg) => {
+      const chatId = msg.chat.id;
+      try {
+        const pnl = await this.tradingService.getTotalPnL();
+        const pnlSign = pnl.totalPnL >= 0 ? '📈' : '📉';
+        
+        const message = `📊 <b>Total Profit & Loss</b>\n\n` +
+          `💰 Total Invested: $${pnl.totalInvested.toFixed(2)}\n` +
+          `💵 Total Value: $${pnl.totalValue.toFixed(2)}\n` +
+          `${pnlSign} Total PnL: $${pnl.totalPnL >= 0 ? '+' : ''}${pnl.totalPnL.toFixed(2)}\n` +
+          `${pnlSign} PnL %: ${pnl.totalPnLPercentage >= 0 ? '+' : ''}${pnl.totalPnLPercentage.toFixed(2)}%`;
+        
+        this.bot!.sendMessage(chatId, message, { parse_mode: 'HTML' }).catch(() => {});
+      } catch (error: any) {
+        logger.error('Error getting PnL:', error);
+        this.bot!.sendMessage(chatId, `❌ Error: ${error.message || 'Failed to get PnL'}`).catch(() => {});
+      }
+    });
+
+    // /checkcoin command - Check if coin exists on DEX (PancakeSwap for BSC, or Solana DEX)
+    this.bot.onText(/\/checkcoin\s+(.+)/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const input = match && match[1] ? match[1].trim() : '';
+      
+      if (!input) {
+        this.bot!.sendMessage(chatId, '❌ Please provide token address.\nUsage: /checkcoin <token_address>\n\nSupported:\n• BSC: 0x... (42 chars)\n• Solana: Base58 (32-44 chars)').catch(() => {});
+        return;
+      }
+
+      try {
+        // Detect chain type
+        const isBSC = input.match(/^0x[a-fA-F0-9]{40}$/);
+        const isSolana = input.match(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/);
+        
+        if (!isBSC && !isSolana) {
+          this.bot!.sendMessage(
+            chatId, 
+            '❌ Invalid token address format.\n\n' +
+            'Supported formats:\n' +
+            '• <b>BSC:</b> 0x... (42 characters)\n' +
+            '• <b>Solana:</b> Base58 (32-44 characters)\n\n' +
+            'Contoh:\n' +
+            '• BSC: 0xd44bfa2e3c780fa8bcae8cda4f04e1bcbd8df126\n' +
+            '• Solana: DYj6YVZkHcytZBtTSFPnMi5NLNHueNvcmCdmYNTkpump',
+            { parse_mode: 'HTML' }
+          ).catch(() => {});
+          return;
+        }
+
+        const chainName = isBSC ? 'PancakeSwap (BSC)' : 'Solana DEX';
+        this.bot!.sendMessage(chatId, `🔍 Checking coin on ${chainName}...`).catch(() => {});
+        
+        const result = await this.tradingService.checkTokenOnPancakeSwap(input);
+        
+        if (!result.exists) {
+          const chainText = result.chain === 'bsc' ? 'PancakeSwap (BSC)' : 
+                           result.chain === 'solana' ? 'Solana DEX' : 'DEX';
+          this.bot!.sendMessage(
+            chatId,
+            `❌ <b>Token Not Found on ${chainText}</b>\n\n` +
+            `📍 Address: <code>${input}</code>\n` +
+            `🔗 Chain: ${chainText}\n\n` +
+            `Token tidak ditemukan di ${chainText}.\n` +
+            `Pastikan alamat token benar atau token belum terdaftar.`,
+            { parse_mode: 'HTML' }
+          ).catch(() => {});
+          return;
+        }
+
+        const chainText = result.chain === 'bsc' ? 'PancakeSwap (BSC)' : 'Solana DEX';
+        const priceChangeEmoji = result.priceChange24h && result.priceChange24h >= 0 ? '📈' : '📉';
+        const priceChangeText = result.priceChange24h !== undefined 
+          ? `${priceChangeEmoji} ${result.priceChange24h >= 0 ? '+' : ''}${result.priceChange24h.toFixed(2)}% (24h)`
+          : 'N/A';
+
+        let message = 
+          `✅ <b>Token Found on ${chainText}</b>\n\n` +
+          `🪙 Name: ${result.name || 'Unknown'}\n` +
+          `💎 Symbol: <b>${result.symbol || 'Unknown'}</b>\n` +
+          `📍 Address: <code>${input}</code>\n` +
+          `🔗 Chain: ${chainText}\n\n`;
+        
+        if (result.price !== undefined) {
+          message += `💰 Price: $${result.price.toFixed(8)}\n`;
+        }
+        
+        message += `📊 24h Change: ${priceChangeText}\n`;
+        
+        if (result.liquidity !== undefined) {
+          const liquidityText = result.liquidity >= 1000000 
+            ? `$${(result.liquidity / 1000000).toFixed(2)}M`
+            : `$${(result.liquidity / 1000).toFixed(2)}K`;
+          message += `💧 Liquidity: ${liquidityText}\n`;
+        }
+        
+        if (result.volume24h !== undefined) {
+          const volumeText = result.volume24h >= 1000000 
+            ? `$${(result.volume24h / 1000000).toFixed(2)}M`
+            : `$${(result.volume24h / 1000).toFixed(2)}K`;
+          message += `📈 Volume 24h: ${volumeText}\n`;
+        }
+
+        if (result.pairs && result.pairs.length > 0) {
+          message += `\n🔗 Pairs Found: ${result.pairs.length}`;
+          
+          // Show top 3 pairs
+          const topPairs = result.pairs.slice(0, 3);
+          topPairs.forEach((pair, index) => {
+            const pairLiquidity = pair.liquidity?.usd 
+              ? (pair.liquidity.usd >= 1000000 
+                  ? `$${(pair.liquidity.usd / 1000000).toFixed(2)}M`
+                  : `$${(pair.liquidity.usd / 1000).toFixed(2)}K`)
+              : 'N/A';
+            const dexName = pair.dexId || 'Unknown DEX';
+            message += `\n${index + 1}. ${pair.baseToken.symbol}/${pair.quoteToken.symbol} (${dexName}) - Liq: ${pairLiquidity}`;
+          });
+        }
+
+        // Generate DexScreener link based on chain
+        const dexscreenerLink = result.chain === 'bsc' 
+          ? `https://dexscreener.com/bsc/${input}`
+          : `https://dexscreener.com/solana/${input}`;
+        message += `\n\n🌐 DexScreener: ${dexscreenerLink}`;
+        
+        this.bot!.sendMessage(chatId, message, { parse_mode: 'HTML', disable_web_page_preview: true }).catch(() => {});
+      } catch (error: any) {
+        logger.error('Error checking token:', error);
+        this.bot!.sendMessage(chatId, `❌ Error: ${error.message || 'Failed to check token'}`).catch(() => {});
+      }
+    });
+
+    // /24h command - Get 24h timeframe statistics
+    this.bot.onText(/\/24h\s+(.+)/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const input = match && match[1] ? match[1].trim() : '';
+      
+      if (!input) {
+        this.bot!.sendMessage(chatId, '❌ Please provide token address.\nUsage: /24h <token_address>\n\nSupported:\n• BSC: 0x... (42 chars)\n• Solana: Base58 (32-44 chars)').catch(() => {});
+        return;
+      }
+
+      try {
+        // Detect chain type
+        const isBSC = input.match(/^0x[a-fA-F0-9]{40}$/);
+        const isSolana = input.match(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/);
+        
+        if (!isBSC && !isSolana) {
+          this.bot!.sendMessage(
+            chatId, 
+            '❌ Invalid token address format.\n\n' +
+            'Supported formats:\n' +
+            '• <b>BSC:</b> 0x... (42 characters)\n' +
+            '• <b>Solana:</b> Base58 (32-44 characters)',
+            { parse_mode: 'HTML' }
+          ).catch(() => {});
+          return;
+        }
+
+        const chainName = isBSC ? 'PancakeSwap (BSC)' : 'Solana DEX';
+        this.bot!.sendMessage(chatId, `📊 Analyzing 24h timeframe on ${chainName}...`).catch(() => {});
+        
+        const result = await this.tradingService.get24hTimeframe(input);
+        
+        if (!result.exists) {
+          const chainText = result.chain === 'bsc' ? 'PancakeSwap (BSC)' : 
+                           result.chain === 'solana' ? 'Solana DEX' : 'DEX';
+          this.bot!.sendMessage(
+            chatId,
+            `❌ <b>Token Not Found on ${chainText}</b>\n\n` +
+            `📍 Address: <code>${input}</code>\n\n` +
+            `Token tidak ditemukan di ${chainText}.`,
+            { parse_mode: 'HTML' }
+          ).catch(() => {});
+          return;
+        }
+
+        const chainText = result.chain === 'bsc' ? 'PancakeSwap (BSC)' : 'Solana DEX';
+        const priceChangeEmoji = result.priceChange24h && result.priceChange24h >= 0 ? '📈' : '📉';
+        
+        let message = `📊 <b>24h Timeframe Analysis</b>\n\n`;
+        message += `🪙 <b>${result.name || 'Unknown'}</b> (${result.symbol || 'Unknown'})\n`;
+        message += `📍 <code>${input}</code>\n`;
+        message += `🔗 ${chainText}\n\n`;
+        
+        message += `💰 <b>Price Information</b>\n`;
+        if (result.currentPrice !== undefined) {
+          message += `Current: $${result.currentPrice.toFixed(8)}\n`;
+        }
+        
+        if (result.high24h !== undefined && result.low24h !== undefined) {
+          message += `24h High: $${result.high24h.toFixed(8)}\n`;
+          message += `24h Low: $${result.low24h.toFixed(8)}\n`;
+          if (result.currentPrice) {
+            const rangePercent = ((result.high24h - result.low24h) / result.low24h) * 100;
+            message += `Range: ${rangePercent.toFixed(2)}%\n`;
+          }
+        }
+        
+        if (result.priceChange24h !== undefined) {
+          message += `${priceChangeEmoji} 24h Change: ${result.priceChange24h >= 0 ? '+' : ''}${result.priceChange24h.toFixed(2)}%\n`;
+        }
+        
+        // Price change breakdown
+        if (result.priceChange) {
+          message += `\n📈 <b>Price Changes</b>\n`;
+          if (result.priceChange.h1 !== undefined) {
+            message += `1h: ${result.priceChange.h1 >= 0 ? '+' : ''}${result.priceChange.h1.toFixed(2)}%\n`;
+          }
+          if (result.priceChange.h6 !== undefined) {
+            message += `6h: ${result.priceChange.h6 >= 0 ? '+' : ''}${result.priceChange.h6.toFixed(2)}%\n`;
+          }
+          if (result.priceChange.h24 !== undefined) {
+            message += `24h: ${result.priceChange.h24 >= 0 ? '+' : ''}${result.priceChange.h24.toFixed(2)}%\n`;
+          }
+        }
+        
+        message += `\n💧 <b>Volume (24h)</b>\n`;
+        if (result.volume24h !== undefined) {
+          const volumeText = result.volume24h >= 1000000 
+            ? `$${(result.volume24h / 1000000).toFixed(2)}M`
+            : result.volume24h >= 1000
+            ? `$${(result.volume24h / 1000).toFixed(2)}K`
+            : `$${result.volume24h.toFixed(2)}`;
+          message += `24h: ${volumeText}\n`;
+        }
+        if (result.volume6h !== undefined) {
+          const volume6hText = result.volume6h >= 1000000 
+            ? `$${(result.volume6h / 1000000).toFixed(2)}M`
+            : result.volume6h >= 1000
+            ? `$${(result.volume6h / 1000).toFixed(2)}K`
+            : `$${result.volume6h.toFixed(2)}`;
+          message += `6h: ${volume6hText}\n`;
+        }
+        if (result.volume1h !== undefined) {
+          const volume1hText = result.volume1h >= 1000000 
+            ? `$${(result.volume1h / 1000000).toFixed(2)}M`
+            : result.volume1h >= 1000
+            ? `$${(result.volume1h / 1000).toFixed(2)}K`
+            : `$${result.volume1h.toFixed(2)}`;
+          message += `1h: ${volume1hText}\n`;
+        }
+        
+        // Transactions
+        if (result.txns24h) {
+          message += `\n🔄 <b>Transactions (24h)</b>\n`;
+          message += `Total: ${result.txns24h.total.toLocaleString()}\n`;
+          message += `✅ Buys: ${result.txns24h.buys.toLocaleString()}\n`;
+          message += `❌ Sells: ${result.txns24h.sells.toLocaleString()}\n`;
+          if (result.txns24h.total > 0) {
+            const buyRatio = (result.txns24h.buys / result.txns24h.total) * 100;
+            message += `Buy Ratio: ${buyRatio.toFixed(2)}%\n`;
+          }
+        }
+        
+        // Liquidity & Market Cap
+        message += `\n💎 <b>Market Info</b>\n`;
+        if (result.liquidity !== undefined) {
+          const liquidityText = result.liquidity >= 1000000 
+            ? `$${(result.liquidity / 1000000).toFixed(2)}M`
+            : `$${(result.liquidity / 1000).toFixed(2)}K`;
+          message += `Liquidity: ${liquidityText}\n`;
+        }
+        if (result.marketCap !== undefined) {
+          const marketCapText = result.marketCap >= 1000000 
+            ? `$${(result.marketCap / 1000000).toFixed(2)}M`
+            : `$${(result.marketCap / 1000).toFixed(2)}K`;
+          message += `Market Cap: ${marketCapText}\n`;
+        }
+        if (result.fdv !== undefined) {
+          const fdvText = result.fdv >= 1000000 
+            ? `$${(result.fdv / 1000000).toFixed(2)}M`
+            : `$${(result.fdv / 1000).toFixed(2)}K`;
+          message += `FDV: ${fdvText}\n`;
+        }
+        
+        // Pairs info
+        if (result.pairs && result.pairs.length > 0) {
+          message += `\n🔗 <b>Pairs:</b> ${result.pairs.length}`;
+        }
+
+        // DexScreener link
+        const dexscreenerLink = result.chain === 'bsc' 
+          ? `https://dexscreener.com/bsc/${input}`
+          : `https://dexscreener.com/solana/${input}`;
+        message += `\n\n🌐 <a href="${dexscreenerLink}">View on DexScreener</a>`;
+        
+        this.bot!.sendMessage(chatId, message, { parse_mode: 'HTML', disable_web_page_preview: true }).catch(() => {});
+      } catch (error: any) {
+        logger.error('Error getting 24h timeframe:', error);
+        this.bot!.sendMessage(chatId, `❌ Error: ${error.message || 'Failed to get 24h timeframe'}`).catch(() => {});
+      }
+    });
+
+    // /infocoin command - Get coin information from internet (website, social media, etc.)
+    this.bot.onText(/\/infocoin\s+(.+)/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const input = match && match[1] ? match[1].trim() : '';
+      
+      if (!input) {
+        this.bot!.sendMessage(chatId, '❌ Please provide token address.\nUsage: /infocoin <token_address>\n\nSupported:\n• BSC: 0x... (42 chars)\n• Solana: Base58 (32-44 chars)').catch(() => {});
+        return;
+      }
+
+      try {
+        // Detect chain type
+        const isBSC = input.match(/^0x[a-fA-F0-9]{40}$/);
+        const isSolana = input.match(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/);
+        
+        if (!isBSC && !isSolana) {
+          this.bot!.sendMessage(
+            chatId, 
+            '❌ Invalid token address format.\n\n' +
+            'Supported formats:\n' +
+            '• <b>BSC:</b> 0x... (42 characters)\n' +
+            '• <b>Solana:</b> Base58 (32-44 characters)',
+            { parse_mode: 'HTML' }
+          ).catch(() => {});
+          return;
+        }
+
+        const chainName = isBSC ? 'BSC' : 'Solana';
+        this.bot!.sendMessage(chatId, `🔍 Searching coin information on ${chainName}...`).catch(() => {});
+        
+        const result = await this.tradingService.getCoinInfo(input);
+        
+        if (!result.exists) {
+          const chainText = result.chain === 'bsc' ? 'PancakeSwap (BSC)' : 
+                           result.chain === 'solana' ? 'Solana DEX' : 'DEX';
+          this.bot!.sendMessage(
+            chatId,
+            `❌ <b>Token Not Found</b>\n\n` +
+            `📍 Address: <code>${input}</code>\n\n` +
+            `Token tidak ditemukan di ${chainText}.`,
+            { parse_mode: 'HTML' }
+          ).catch(() => {});
+          return;
+        }
+
+        const chainText = result.chain === 'bsc' ? 'BSC (Binance Smart Chain)' : 'Solana';
+        
+        let message = `ℹ️ <b>Coin Information</b>\n\n`;
+        message += `🪙 <b>${result.name || 'Unknown'}</b> (${result.symbol || 'Unknown'})\n`;
+        message += `📍 Address: <code>${result.address}</code>\n`;
+        message += `🔗 Chain: ${chainText}\n\n`;
+
+        // Social Links
+        let hasLinks = false;
+        message += `<b>🌐 Social & Links</b>\n`;
+        
+        if (result.website) {
+          message += `🌍 Website: <a href="${result.website}">${result.website.replace(/^https?:\/\//, '')}</a>\n`;
+          hasLinks = true;
+        }
+        
+        if (result.twitter) {
+          const twitterHandle = result.twitter.replace(/^https?:\/\/(www\.)?(twitter\.com|x\.com)\//, '').replace(/^@/, '');
+          message += `🐦 Twitter/X: <a href="${result.twitter}">@${twitterHandle}</a>\n`;
+          hasLinks = true;
+        }
+        
+        if (result.telegram) {
+          const telegramHandle = result.telegram.replace(/^https?:\/\/(t\.me|telegram\.me)\//, '').replace(/^@/, '');
+          message += `💬 Telegram: <a href="${result.telegram}">@${telegramHandle}</a>\n`;
+          hasLinks = true;
+        }
+        
+        if (result.discord) {
+          message += `💎 Discord: <a href="${result.discord}">Join Server</a>\n`;
+          hasLinks = true;
+        }
+        
+        if (result.reddit) {
+          message += `🔴 Reddit: <a href="${result.reddit}">View Community</a>\n`;
+          hasLinks = true;
+        }
+
+        if (!hasLinks) {
+          message += `ℹ️ No social links found in database\n`;
+        }
+
+        // Community Data (if available)
+        if (result.community_data) {
+          message += `\n<b>👥 Community</b>\n`;
+          if (result.community_data.twitter_followers) {
+            const followers = result.community_data.twitter_followers >= 1000000
+              ? `${(result.community_data.twitter_followers / 1000000).toFixed(2)}M`
+              : result.community_data.twitter_followers >= 1000
+              ? `${(result.community_data.twitter_followers / 1000).toFixed(1)}K`
+              : result.community_data.twitter_followers.toString();
+            message += `Twitter Followers: ${followers}\n`;
+          }
+          if (result.community_data.telegram_channel_user_count) {
+            const users = result.community_data.telegram_channel_user_count >= 1000000
+              ? `${(result.community_data.telegram_channel_user_count / 1000000).toFixed(2)}M`
+              : result.community_data.telegram_channel_user_count >= 1000
+              ? `${(result.community_data.telegram_channel_user_count / 1000).toFixed(1)}K`
+              : result.community_data.telegram_channel_user_count.toString();
+            message += `Telegram Members: ${users}\n`;
+          }
+        }
+
+        // Description
+        if (result.description) {
+          message += `\n<b>📝 Description</b>\n`;
+          // Remove HTML tags and format
+          const cleanDescription = result.description
+            .replace(/<[^>]*>/g, '')
+            .replace(/\n+/g, ' ')
+            .trim();
+          message += `${cleanDescription}\n`;
+        }
+
+        // Additional Links
+        if (result.links) {
+          const additionalLinks: string[] = [];
+          
+          if (result.links.blockchain_site && result.links.blockchain_site.length > 0) {
+            result.links.blockchain_site.slice(0, 2).forEach((link: string) => {
+              if (link && link.startsWith('http')) {
+                additionalLinks.push(`🔗 <a href="${link}">Blockchain Explorer</a>`);
+              }
+            });
+          }
+          
+          if (result.links.repos_url?.github && result.links.repos_url.github.length > 0) {
+            result.links.repos_url.github.slice(0, 1).forEach((link: string) => {
+              if (link && link.startsWith('http')) {
+                additionalLinks.push(`💻 <a href="${link}">GitHub</a>`);
+              }
+            });
+          }
+
+          if (additionalLinks.length > 0) {
+            message += `\n<b>🔗 Additional Links</b>\n${additionalLinks.join('\n')}\n`;
+          }
+        }
+
+        // CoinGecko link (only show if we have validated data)
+        if (result.coingecko_id) {
+          message += `\n📊 <a href="https://www.coingecko.com/en/coins/${result.coingecko_id}">View on CoinGecko</a>`;
+          message += `\n✅ <i>CoinGecko data validated by contract address</i>`;
+        } else {
+          message += `\n⚠️ <i>Coin not found in CoinGecko database (contract address not registered)</i>`;
+        }
+
+        // DexScreener link
+        const dexscreenerLink = result.chain === 'bsc' 
+          ? `https://dexscreener.com/bsc/${result.address}`
+          : `https://dexscreener.com/solana/${result.address}`;
+        message += `📈 <a href="${dexscreenerLink}">View on DexScreener</a>`;
+        
+        this.bot!.sendMessage(chatId, message, { parse_mode: 'HTML', disable_web_page_preview: true }).catch(() => {});
+      } catch (error: any) {
+        logger.error('Error getting coin info:', error);
+        this.bot!.sendMessage(chatId, `❌ Error: ${error.message || 'Failed to get coin information'}`).catch(() => {});
       }
     });
 

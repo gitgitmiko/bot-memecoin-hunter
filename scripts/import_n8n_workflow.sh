@@ -35,13 +35,25 @@ echo ""
 
 # Read n8n URL from .env
 if [ -f .env ]; then
-    N8N_URL=$(grep "^N8N_URL=" .env 2>/dev/null | cut -d '=' -f2- | tr -d '"' | tr -d "'" | xargs || echo "")
+    N8N_HOST=$(grep "^N8N_HOST=" .env 2>/dev/null | cut -d '=' -f2- | tr -d '"' | tr -d "'" | xargs || echo "")
+    N8N_PROTOCOL=$(grep "^N8N_PROTOCOL=" .env 2>/dev/null | cut -d '=' -f2- | tr -d '"' | tr -d "'" | xargs || echo "https")
     N8N_API_KEY=$(grep "^N8N_API_KEY=" .env 2>/dev/null | cut -d '=' -f2- | tr -d '"' | tr -d "'" | xargs || echo "")
+    
+    if [ -n "$N8N_HOST" ]; then
+        # Remove trailing slash
+        N8N_HOST=$(echo "$N8N_HOST" | sed 's|/$||')
+        
+        if [[ "$N8N_HOST" == http* ]]; then
+            N8N_URL="$N8N_HOST"
+        else
+            N8N_URL="${N8N_PROTOCOL}://${N8N_HOST}"
+        fi
+    fi
 fi
 
 # Check if n8n is accessible
 if [ -z "$N8N_URL" ]; then
-    log_warn "N8N_URL not found in .env"
+    log_warn "N8N_HOST not found in .env"
     log_info "Trying to detect n8n URL from docker compose..."
     
     # Try to get from docker compose
@@ -51,19 +63,22 @@ if [ -z "$N8N_URL" ]; then
             # Check for cloudflared tunnel
             if [ -f ~/.cloudflared/config.yaml ] || docker compose ps | grep -q cloudflared; then
                 log_info "Cloudflared detected. Please check your Cloudflared URL."
-                log_info "Or access n8n locally at: https://abs-also-regional-musicians.trycloudflare.com/"
-                N8N_URL="https://abs-also-regional-musicians.trycloudflare.com/"
+                log_info "Or access n8n locally at: https://abs-also-regional-musicians.trycloudflare.com"
+                N8N_URL="https://abs-also-regional-musicians.trycloudflare.com"
             else
-                N8N_URL="https://abs-also-regional-musicians.trycloudflare.com/"
+                N8N_URL="https://abs-also-regional-musicians.trycloudflare.com"
             fi
         fi
     fi
 fi
 
 if [ -z "$N8N_URL" ]; then
-    N8N_URL="https://abs-also-regional-musicians.trycloudflare.com/"
+    N8N_URL="https://abs-also-regional-musicians.trycloudflare.com"
     log_warn "Using default URL: $N8N_URL"
 fi
+
+# Remove trailing slash to avoid double slash in API calls
+N8N_URL=$(echo "$N8N_URL" | sed 's|/$||')
 
 log_info "n8n URL: $N8N_URL"
 echo ""
@@ -131,7 +146,6 @@ PYEOF
 else
     log_warn "N8N_API_KEY not found in .env"
 fi
-
 # Method 2: Manual import instructions
 echo ""
 log_info "=== Manual Import via n8n UI ==="
@@ -175,4 +189,5 @@ log_info "Workflow file location:"
 echo "   ${GREEN}$WORKFLOW_FILE${NC}"
 echo ""
 log_info "Atau buka file di editor dan copy-paste manual ke n8n UI"
+
 

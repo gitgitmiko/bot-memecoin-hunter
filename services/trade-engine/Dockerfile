@@ -4,29 +4,22 @@ FROM node:20-alpine
 WORKDIR /app
 
 # Install dependencies (including dev for TypeScript)
-COPY telegram-bot/package*.json ./
+COPY trade-engine/package*.json ./
 RUN npm install && npm cache clean --force
 
 # Copy TypeScript config
-COPY telegram-bot/tsconfig.json ./
+COPY trade-engine/tsconfig.json ./
 
 # Copy source code
-COPY telegram-bot/src ./src
+COPY trade-engine/src ./src
 
-# Copy shared libraries
+# Copy shared folder (from services directory context)
 COPY shared ./shared
-
-# Copy trade-engine source for TradeService (needed for buy/sell operations)
-COPY trade-engine/src ./trade-engine/src
-
-# Copy shared to trade-engine so relative imports work (../../shared)
-RUN cp -r shared trade-engine/shared || true
 
 # Build TypeScript
 RUN npm run build
-RUN ls -la && ls -la dist/ 2>&1 || echo "dist not found after build"
 
-# Remove dev dependencies (but keep dist folder)
+# Remove dev dependencies
 RUN npm prune --production
 
 # Create logs directory
@@ -45,5 +38,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
   CMD node healthcheck.js || exit 1
 
 # Start application
-CMD ["node", "dist/src/index.js"]
+CMD ["node", "dist/index.js"]
 

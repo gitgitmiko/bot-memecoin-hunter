@@ -229,8 +229,8 @@ services:
 
   telegram-bot:
     build:
-      context: ./services/telegram-bot
-      dockerfile: Dockerfile
+      context: ./services
+      dockerfile: telegram-bot/Dockerfile
     container_name: memecoin-telegram-bot
     restart: unless-stopped
     environment:
@@ -247,9 +247,14 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - TZ=${TIMEZONE:-Asia/Jakarta}
+      - BSC_RPC_URL=${BSC_RPC_URL:-https://bsc-dataseed1.binance.org/}
+      - WALLET_MNEMONIC=${WALLET_MNEMONIC}
+      - WALLET_PRIVATE_KEY=${WALLET_PRIVATE_KEY}
+      - WALLET_ACCOUNT_INDEX=${WALLET_ACCOUNT_INDEX:-0}
     volumes:
       - telegram_bot_logs:/app/logs
-      - ./services/telegram-bot:/app
+      - ./services/trade-engine/src:/app/trade-engine/src:ro
+      - ./services/shared:/app/shared:ro
     networks:
       - memecoin-network
     depends_on:
@@ -271,6 +276,106 @@ services:
         reservations:
           cpus: '0.25'
           memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  trade-engine:
+    build:
+      context: ./services
+      dockerfile: trade-engine/Dockerfile
+    container_name: memecoin-trade-engine
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-memecoin_hunter}
+      - POSTGRES_USER=${POSTGRES_USER:-memecoin_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - BSC_RPC_URL=${BSC_RPC_URL:-https://bsc-dataseed1.binance.org/}
+      - WALLET_MNEMONIC=${WALLET_MNEMONIC}
+      - WALLET_PRIVATE_KEY=${WALLET_PRIVATE_KEY}
+      - WALLET_ACCOUNT_INDEX=${WALLET_ACCOUNT_INDEX:-0}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - TZ=${TIMEZONE:-Asia/Jakarta}
+    volumes:
+      - trade_engine_logs:/app/logs
+      - ./services/trade-engine:/app
+      - ./services/shared:/app/shared
+    networks:
+      - memecoin-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.js"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  dex-price-monitor:
+    build:
+      context: ./services
+      dockerfile: dex-price-monitor/Dockerfile
+    container_name: memecoin-dex-price-monitor
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-memecoin_hunter}
+      - POSTGRES_USER=${POSTGRES_USER:-memecoin_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - BSC_RPC_URL=${BSC_RPC_URL:-https://bsc-dataseed1.binance.org/}
+      - WALLET_MNEMONIC=${WALLET_MNEMONIC}
+      - WALLET_PRIVATE_KEY=${WALLET_PRIVATE_KEY}
+      - WALLET_ACCOUNT_INDEX=${WALLET_ACCOUNT_INDEX:-0}
+      - PRICE_MONITOR_INTERVAL_MS=${PRICE_MONITOR_INTERVAL_MS:-45000}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - TZ=${TIMEZONE:-Asia/Jakarta}
+    volumes:
+      - price_monitor_logs:/app/logs
+      - ./services/dex-price-monitor:/app
+      - ./services/trade-engine:/app/trade-engine
+      - ./services/shared:/app/shared
+    networks:
+      - memecoin-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      trade-engine:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.js"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
     logging:
       driver: "json-file"
       options:
@@ -311,4 +416,10 @@ volumes:
   telegram_bot_logs:
     driver: local
     name: memecoin-telegram-bot-logs
+  trade_engine_logs:
+    driver: local
+    name: memecoin-trade-engine-logs
+  price_monitor_logs:
+    driver: local
+    name: memecoin-price-monitor-logs
 

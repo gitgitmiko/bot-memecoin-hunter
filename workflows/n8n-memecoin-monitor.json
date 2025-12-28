@@ -21,7 +21,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT DISTINCT ON (a.coin_id) a.id, a.coin_id, a.overall_score, a.price_score, a.volume_score, a.social_score, a.risk_score, a.created_at, a.metrics::jsonb->>'riskLevel' as risk_level, a.metrics::jsonb->'riskReasons' as risk_reasons, c.address, c.symbol, c.name, c.chain_id, c.liquidity, COALESCE((c.raw_data->'volume'->>'h24')::numeric, 0) as volume24h FROM analyses a INNER JOIN coins c ON a.coin_id = c.id WHERE a.created_at >= NOW() - INTERVAL '2 minutes' AND c.address IS NOT NULL AND c.symbol IS NOT NULL AND a.overall_score IS NOT NULL AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.coin_id = a.coin_id AND n.sent_at >= NOW() - INTERVAL '1 hour') ORDER BY a.coin_id, a.created_at DESC LIMIT 10",
+        "query": "SELECT DISTINCT ON (a.coin_id) a.id, a.coin_id, a.overall_score, a.price_score, a.volume_score, a.social_score, a.risk_score, a.created_at, a.metrics::jsonb->>'riskLevel' as risk_level, a.metrics::jsonb->'riskReasons' as risk_reasons, c.address, c.symbol, c.name, c.chain_id, c.liquidity, COALESCE((c.raw_data->'volume'->>'h24')::numeric, 0) as volume24h FROM analyses a INNER JOIN coins c ON a.coin_id = c.id WHERE a.created_at >= NOW() - INTERVAL '2 minutes' AND c.address IS NOT NULL AND c.symbol IS NOT NULL AND a.overall_score IS NOT NULL AND a.overall_score >= 70 AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.coin_id = a.coin_id AND n.sent_at >= NOW() - INTERVAL '1 hour') ORDER BY a.coin_id, a.created_at DESC LIMIT 10",
         "options": {}
       },
       "id": "query-db",
