@@ -19,7 +19,7 @@
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src/**/*", "shared/**/*", "trade-engine/src/**/*"],
+  "include": ["src/**/*", "../shared/**/*", "../trade-engine/src/**/*"],
   "exclude": ["node_modules", "dist"]
 }
 

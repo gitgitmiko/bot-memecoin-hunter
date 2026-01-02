@@ -95,6 +95,8 @@ I'll alert you when we discover high-scoring meme coins.
 /dbstats - 📊 Database statistics (total coins, analyses, high scores)
 /dblist [limit] - 📋 List recent coins by created_at (default: 10, max: 20)
 /dbnew [limit] - 🆕 List new coins by discovered_at (default: 10, max: 20)
+/newbsc [limit] - 🆕 List new BSC coins (default: 10, max: 20)
+/newsolana [limit] - 🆕 List new Solana coins (default: 10, max: 20)
 /dbcoin &lt;address&gt; - 🪙 Get detailed coin information by address
 /dbhighscore [limit] - ⭐ List high score coins (score > 70, default: 10, max: 20)
 
@@ -103,8 +105,11 @@ I'll alert you when we discover high-scoring meme coins.
 /buy &lt;token&gt; - 💰 Buy $10 of token
 /status &lt;token&gt; - 📈 Get position status
 /sell &lt;token&gt; - 💸 Force sell position
-/balance - 💵 Check wallet balance
+/balance [address] - 💵 Check wallet balance (BUSD & BNB), or check specific address (read-only)
+/transfer &lt;address&gt; &lt;amount&gt; - 💸 Transfer BNB from bot wallet to address
 /pnl - 📊 Total profit & loss
+/walletinfo [index] - 🔑 Show wallet address and test account indices
+/checkwallet &lt;address&gt; - 🔍 Search wallet address in indices 0-20
 /checkcoin &lt;address&gt; - 🔍 Check if coin exists on DEX (BSC/Solana)
 /24h &lt;address&gt; - 📊 Get 24h timeframe analysis
 /infocoin &lt;address&gt; - ℹ️ Get coin information (website, social media, etc.)
@@ -143,8 +148,11 @@ I'll alert you when we discover high-scoring meme coins.
 /buy &lt;token_address&gt; - 💰 Buy $10 of token (BSC only)
 /status &lt;token_address&gt; - 📈 Get position status by token address
 /sell &lt;token_address&gt; - 💸 Force sell position
-/balance - 💵 Check wallet balance (BUSD & BNB)
+/balance [address] - 💵 Check wallet balance (BUSD & BNB), or check specific address (read-only)
+/transfer &lt;address&gt; &lt;amount&gt; - 💸 Transfer BNB from bot wallet to address
 /pnl - 📊 Total profit & loss across all positions
+/walletinfo [index] - 🔑 Show wallet address and test account indices
+/checkwallet &lt;address&gt; - 🔍 Search wallet address in indices 0-20
 /checkcoin &lt;address&gt; - 🔍 Check if coin exists on DEX (BSC/Solana)
 /24h &lt;address&gt; - 📊 Get detailed 24h timeframe analysis
 /infocoin &lt;address&gt; - ℹ️ Get coin information from internet (website, X/Twitter, Telegram, etc.)
@@ -432,6 +440,124 @@ ${stats.latestAnalysisDate ? `📊 <b>Latest Analysis:</b> ${new Date(stats.late
       }
     });
 
+    // /newbsc command - Get new BSC coins
+    this.bot.onText(/\/newbsc(?:\s+(\d+))?/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const limit = match && match[1] ? parseInt(match[1], 10) : 10;
+      const safeLimit = Math.min(Math.max(limit, 1), 20); // Limit between 1-20
+
+      try {
+        const coins = await this.dataService.getNewCoinsByChain(56, safeLimit); // BSC chain_id = 56
+        
+        if (coins.length === 0) {
+          this.bot!.sendMessage(chatId, '🆕 No new BSC coins found in database.').catch(() => {});
+          return;
+        }
+
+        let message = `🆕 <b>New BSC Coins (${coins.length}/${safeLimit})</b>\n`;
+        message += `<i>Ordered by discovered_at (newest first)</i>\n\n`;
+        
+        coins.forEach((coin, index) => {
+          const symbol = coin.symbol || 'N/A';
+          const name = coin.name || 'Unknown';
+          const score = coin.overallScore !== null ? `${coin.overallScore}/100` : 'N/A';
+          
+          message += `<b>${index + 1}. ${symbol}</b> (${name})\n`;
+          message += `📍 <code>${coin.address}</code>\n`;
+          message += `⛓️ BSC\n`;
+          message += `⭐ Score: ${score}\n`;
+          if (coin.priceScore !== null || coin.volumeScore !== null) {
+            message += `💰 Price: ${coin.priceScore !== null ? coin.priceScore : 'N/A'}/100 | `;
+            message += `📊 Volume: ${coin.volumeScore !== null ? coin.volumeScore : 'N/A'}/100\n`;
+          }
+          if (coin.liquidity) {
+            message += `💵 Liquidity: $${coin.liquidity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
+          }
+          message += `📅 Discovered: ${new Date(coin.createdAt).toLocaleString()}\n\n`;
+        });
+
+        // Split message if too long (Telegram limit is 4096 characters)
+        if (message.length > 4000) {
+          const chunks = message.match(/[\s\S]{1,4000}/g) || [];
+          for (const chunk of chunks) {
+            await this.bot!.sendMessage(chatId, chunk, {
+              parse_mode: 'HTML',
+            }).catch((error) => {
+              logger.error('Error sending newbsc message chunk:', error);
+            });
+          }
+        } else {
+          this.bot!.sendMessage(chatId, message, {
+            parse_mode: 'HTML',
+          }).catch((error) => {
+            logger.error('Error sending newbsc message:', error);
+          });
+        }
+      } catch (error) {
+        logger.error('Error getting newbsc:', error);
+        this.bot!.sendMessage(chatId, '❌ Error getting new BSC coins. Please try again later.').catch(() => {});
+      }
+    });
+
+    // /newsolana command - Get new Solana coins
+    this.bot.onText(/\/newsolana(?:\s+(\d+))?/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const limit = match && match[1] ? parseInt(match[1], 10) : 10;
+      const safeLimit = Math.min(Math.max(limit, 1), 20); // Limit between 1-20
+
+      try {
+        const coins = await this.dataService.getNewCoinsByChain(999, safeLimit); // Solana chain_id = 999
+        
+        if (coins.length === 0) {
+          this.bot!.sendMessage(chatId, '🆕 No new Solana coins found in database.').catch(() => {});
+          return;
+        }
+
+        let message = `🆕 <b>New Solana Coins (${coins.length}/${safeLimit})</b>\n`;
+        message += `<i>Ordered by discovered_at (newest first)</i>\n\n`;
+        
+        coins.forEach((coin, index) => {
+          const symbol = coin.symbol || 'N/A';
+          const name = coin.name || 'Unknown';
+          const score = coin.overallScore !== null ? `${coin.overallScore}/100` : 'N/A';
+          
+          message += `<b>${index + 1}. ${symbol}</b> (${name})\n`;
+          message += `📍 <code>${coin.address}</code>\n`;
+          message += `⛓️ Solana\n`;
+          message += `⭐ Score: ${score}\n`;
+          if (coin.priceScore !== null || coin.volumeScore !== null) {
+            message += `💰 Price: ${coin.priceScore !== null ? coin.priceScore : 'N/A'}/100 | `;
+            message += `📊 Volume: ${coin.volumeScore !== null ? coin.volumeScore : 'N/A'}/100\n`;
+          }
+          if (coin.liquidity) {
+            message += `💵 Liquidity: $${coin.liquidity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n`;
+          }
+          message += `📅 Discovered: ${new Date(coin.createdAt).toLocaleString()}\n\n`;
+        });
+
+        // Split message if too long (Telegram limit is 4096 characters)
+        if (message.length > 4000) {
+          const chunks = message.match(/[\s\S]{1,4000}/g) || [];
+          for (const chunk of chunks) {
+            await this.bot!.sendMessage(chatId, chunk, {
+              parse_mode: 'HTML',
+            }).catch((error) => {
+              logger.error('Error sending newsolana message chunk:', error);
+            });
+          }
+        } else {
+          this.bot!.sendMessage(chatId, message, {
+            parse_mode: 'HTML',
+          }).catch((error) => {
+            logger.error('Error sending newsolana message:', error);
+          });
+        }
+      } catch (error) {
+        logger.error('Error getting newsolana:', error);
+        this.bot!.sendMessage(chatId, '❌ Error getting new Solana coins. Please try again later.').catch(() => {});
+      }
+    });
+
     // /dbhighscore command
     this.bot.onText(/\/dbhighscore(?:\s+(\d+))?/, async (msg, match) => {
       const chatId = msg.chat.id;
@@ -572,7 +698,10 @@ ${stats.latestAnalysisDate ? `📊 <b>Latest Analysis:</b> ${new Date(stats.late
           return;
         }
 
-        this.bot!.sendMessage(chatId, `💰 Buying $10 of token...\n📍 Address: <code>${tokenAddress}</code>`, { parse_mode: 'HTML' }).catch(() => {});
+        const walletAddress = this.tradingService.getWalletAddress();
+        const walletInfo = walletAddress ? `\n📍 Wallet: <code>${walletAddress}</code>` : '';
+        
+        this.bot!.sendMessage(chatId, `💰 Buying $10 of token...\n📍 Token: <code>${tokenAddress}</code>${walletInfo}`, { parse_mode: 'HTML' }).catch(() => {});
 
         const result = await this.tradingService.buy(tokenAddress, 10, 5);
         
@@ -586,9 +715,17 @@ ${stats.latestAnalysisDate ? `📊 <b>Latest Analysis:</b> ${new Date(stats.late
         this.bot!.sendMessage(chatId, successMessage, { parse_mode: 'HTML' }).catch(() => {});
       } catch (error: any) {
         logger.error('Error in buy command:', error);
+        const errorMessage = `❌ Buy failed: ${error.message || 'Unknown error'}\n\n` +
+          `💡 <b>Tips:</b>\n` +
+          `• Pastikan WALLET_MNEMONIC atau WALLET_PRIVATE_KEY sudah di-set di .env\n` +
+          `• Pastikan wallet memiliki cukup BUSD untuk buy\n` +
+          `• Pastikan wallet memiliki cukup BNB untuk gas fee\n` +
+          `• Cek log untuk detail error lebih lanjut`;
+        
         this.bot!.sendMessage(
           chatId,
-          `❌ Buy failed: ${error.message || 'Unknown error'}`
+          errorMessage,
+          { parse_mode: 'HTML' }
         ).catch(() => {});
       }
     });
@@ -685,21 +822,257 @@ ${stats.latestAnalysisDate ? `📊 <b>Latest Analysis:</b> ${new Date(stats.late
       }
     });
 
-    // /balance command - Get wallet balance
-    this.bot.onText(/\/balance/, async (msg) => {
+    // /balance command - Get wallet balance (with optional address parameter)
+    this.bot.onText(/\/balance(?:\s+(0x[a-fA-F0-9]{40}))?/, async (msg, match) => {
       const chatId = msg.chat.id;
+      const addressArg = match && match[1] ? match[1] : null;
+      
       try {
-        const balance = await this.tradingService.getBalance();
+        let balance;
+        let isCustomAddress = false;
+        
+        if (addressArg) {
+          // Check balance by address (read-only)
+          balance = await this.tradingService.getBalanceByAddress(addressArg);
+          isCustomAddress = true;
+        } else {
+          // Get balance from configured wallet
+          balance = await this.tradingService.getBalance();
+        }
+        
+        const addressLabel = isCustomAddress ? 'Address' : 'Wallet';
+        const totalValueUSD = 'totalValueUSD' in balance ? balance.totalValueUSD : 0;
         const message = `💵 <b>Wallet Balance</b>\n\n` +
-          `💰 BUSD: ${parseFloat(balance.busd).toFixed(2)}\n` +
-          `⚡ BNB: ${parseFloat(balance.bnb).toFixed(4)}`;
+          `📍 ${addressLabel}: <code>${balance.walletAddress}</code>\n` +
+          (totalValueUSD > 0 ? `💰 Total Value: $${totalValueUSD.toFixed(2)}\n` : '') +
+          `⚡ BNB: ${parseFloat(balance.bnb).toFixed(8)}\n` +
+          `💵 BUSD: ${parseFloat(balance.busd).toFixed(2)}` +
+          (isCustomAddress ? `\n\nℹ️ <i>Read-only balance check (no private key needed)</i>` : '');
         
         this.bot!.sendMessage(chatId, message, { parse_mode: 'HTML' }).catch(() => {});
       } catch (error: any) {
         logger.error('Error getting balance:', error);
+        const errorMessage = addressArg 
+          ? `❌ Error getting balance for address: ${error.message}\n\n` +
+            `💡 Pastikan address format benar (0x... dengan 42 karakter)`
+          : `❌ Error getting balance: ${error.message}\n\n` +
+            `💡 <b>Tips:</b>\n` +
+            `• Pastikan WALLET_MNEMONIC sudah di-set di .env (secret phrase dari Trust Wallet)\n` +
+            `• Format: WALLET_MNEMONIC="word1 word2 word3 ... word12"\n` +
+            `• Pastikan wallet address yang digunakan sudah memiliki BNB untuk gas\n` +
+            `• Gunakan /walletinfo untuk melihat wallet address dari account index berbeda\n` +
+            `• Gunakan /balance <address> untuk cek balance address tertentu (read-only)\n` +
+            `• Cek log untuk detail error lebih lanjut`;
+        
         this.bot!.sendMessage(
           chatId,
-          `❌ Error getting balance: ${error.message}`
+          errorMessage,
+          { parse_mode: 'HTML' }
+        ).catch(() => {});
+      }
+    });
+
+    // /walletinfo command - Get wallet info and test different account indices
+    this.bot.onText(/\/walletinfo(?:\s+(\d+))?/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const testIndex = match && match[1] ? parseInt(match[1], 10) : null;
+      
+      try {
+        const mnemonic = process.env.WALLET_MNEMONIC;
+        if (!mnemonic) {
+          this.bot!.sendMessage(
+            chatId,
+            `❌ WALLET_MNEMONIC tidak ditemukan di environment variables.\n\n` +
+            `💡 Pastikan WALLET_MNEMONIC sudah di-set di .env file dengan format:\n` +
+            `WALLET_MNEMONIC="word1 word2 word3 ... word12"`,
+            { parse_mode: 'HTML' }
+          ).catch(() => {});
+          return;
+        }
+
+        const { getAddressFromMnemonic } = await import('../shared/utils/wallet');
+        const currentIndex = parseInt(process.env.WALLET_ACCOUNT_INDEX || '0');
+        
+        let message = `🔑 <b>Wallet Information</b>\n\n`;
+        message += `📝 <b>Current Configuration:</b>\n`;
+        message += `Account Index: ${currentIndex}\n`;
+        
+        // Show current wallet address
+        try {
+          const currentAddress = getAddressFromMnemonic(mnemonic, currentIndex);
+          message += `📍 Current Wallet: <code>${currentAddress}</code>\n\n`;
+        } catch (error: any) {
+          message += `❌ Error: ${error.message}\n\n`;
+        }
+
+        // If test index provided, show that address
+        if (testIndex !== null) {
+          try {
+            const testAddress = getAddressFromMnemonic(mnemonic, testIndex);
+            message += `🧪 <b>Test Account Index ${testIndex}:</b>\n`;
+            message += `📍 Address: <code>${testAddress}</code>\n\n`;
+            message += `💡 Jika ini adalah wallet yang benar, set WALLET_ACCOUNT_INDEX=${testIndex} di .env`;
+          } catch (error: any) {
+            message += `❌ Error testing index ${testIndex}: ${error.message}\n`;
+          }
+        } else {
+          // Show first 10 account indices
+          message += `📋 <b>Account Indices (0-9):</b>\n`;
+          for (let i = 0; i <= 9; i++) {
+            try {
+              const address = getAddressFromMnemonic(mnemonic, i);
+              const marker = i === currentIndex ? ' 👈 (current)' : '';
+              message += `${i}: <code>${address}</code>${marker}\n`;
+            } catch (error: any) {
+              message += `${i}: ❌ Error\n`;
+            }
+          }
+          message += `\n💡 Gunakan /walletinfo <index> untuk test account index tertentu (0-20)\n`;
+          message += `💡 Gunakan /checkwallet <address> untuk mencari address di index 0-20\n`;
+          message += `💡 Pastikan wallet address di atas sama dengan wallet di Trust Wallet`;
+        }
+        
+        this.bot!.sendMessage(chatId, message, { parse_mode: 'HTML' }).catch(() => {});
+      } catch (error: any) {
+        logger.error('Error getting wallet info:', error);
+        this.bot!.sendMessage(
+          chatId,
+          `❌ Error: ${error.message || 'Failed to get wallet info'}`
+        ).catch(() => {});
+      }
+    });
+
+    // /checkwallet command - Search for a specific wallet address in indices 0-20
+    this.bot.onText(/\/checkwallet\s+(0x[a-fA-F0-9]{40})/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const targetAddress = match && match[1] ? match[1].toLowerCase() : '';
+      
+      if (!targetAddress) {
+        this.bot!.sendMessage(
+          chatId,
+          '❌ Format salah. Gunakan: /checkwallet <wallet_address>\n\n' +
+          'Contoh: /checkwallet 0x0f77bc83BfBf4Ea09A8fE3c0770Edcc8a4c47CB5'
+        ).catch(() => {});
+        return;
+      }
+
+      try {
+        const mnemonic = process.env.WALLET_MNEMONIC;
+        if (!mnemonic) {
+          this.bot!.sendMessage(
+            chatId,
+            `❌ WALLET_MNEMONIC tidak ditemukan di environment variables.`
+          ).catch(() => {});
+          return;
+        }
+
+        const { getAddressFromMnemonic } = await import('../shared/utils/wallet');
+        
+        this.bot!.sendMessage(chatId, `🔍 Mencari address <code>${targetAddress}</code> di index 0-20...`, { parse_mode: 'HTML' }).catch(() => {});
+        
+        let foundIndex: number | null = null;
+        const checkedAddresses: string[] = [];
+        
+        // Check indices 0-20
+        for (let i = 0; i <= 20; i++) {
+          try {
+            const address = getAddressFromMnemonic(mnemonic, i);
+            const normalizedAddress = address.toLowerCase();
+            checkedAddresses.push(normalizedAddress);
+            
+            if (normalizedAddress === targetAddress) {
+              foundIndex = i;
+              break;
+            }
+          } catch (error: any) {
+            // Skip errors and continue
+          }
+        }
+
+        let message = `🔍 <b>Hasil Pencarian</b>\n\n`;
+        message += `📍 Target Address: <code>${targetAddress}</code>\n\n`;
+
+        if (foundIndex !== null) {
+          message += `✅ <b>DITEMUKAN!</b>\n\n`;
+          message += `🔢 Account Index: <b>${foundIndex}</b>\n`;
+          message += `📍 Address: <code>${targetAddress}</code>\n\n`;
+          message += `💡 <b>Langkah selanjutnya:</b>\n`;
+          message += `1. Edit file .env\n`;
+          message += `2. Set: WALLET_ACCOUNT_INDEX=${foundIndex}\n`;
+          message += `3. Restart service: docker-compose restart telegram-bot\n`;
+          message += `4. Verifikasi dengan /balance`;
+        } else {
+          message += `❌ <b>TIDAK DITEMUKAN</b>\n\n`;
+          message += `Address tidak ditemukan di index 0-20.\n\n`;
+          message += `💡 <b>Kemungkinan masalah:</b>\n`;
+          message += `1. ❌ Mnemonic/Secret Phrase di .env berbeda dengan Trust Wallet\n`;
+          message += `2. ❌ Wallet address yang diberikan bukan dari wallet ini\n`;
+          message += `3. ❌ Address menggunakan derivation path yang berbeda\n\n`;
+          message += `🔧 <b>Solusi:</b>\n`;
+          message += `• Pastikan WALLET_MNEMONIC di .env adalah secret phrase dari Trust Wallet yang benar\n`;
+          message += `• Copy secret phrase langsung dari Trust Wallet: Settings → Security → Show Recovery Phrase\n`;
+          message += `• Pastikan format benar (12 atau 24 words, dipisah spasi)\n\n`;
+          message += `📋 <b>Address yang sudah dicek (5 pertama):</b>\n`;
+          checkedAddresses.slice(0, 5).forEach((addr, idx) => {
+            message += `${idx}: <code>${addr}</code>\n`;
+          });
+          message += `... (total ${checkedAddresses.length} addresses checked)`;
+        }
+        
+        this.bot!.sendMessage(chatId, message, { parse_mode: 'HTML' }).catch(() => {});
+      } catch (error: any) {
+        logger.error('Error checking wallet:', error);
+        this.bot!.sendMessage(chatId, `❌ Error: ${error.message || 'Failed to check wallet'}`).catch(() => {});
+      }
+    });
+
+    // /transfer command - Transfer BNB from bot wallet to address
+    this.bot.onText(/\/transfer\s+(0x[a-fA-F0-9]{40})\s+([\d.]+)/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const toAddress = match && match[1] ? match[1] : '';
+      const amount = match && match[2] ? parseFloat(match[2]) : 0;
+      
+      if (!toAddress || amount <= 0) {
+        this.bot!.sendMessage(
+          chatId,
+          '❌ Format salah. Gunakan: /transfer <address> <amount>\n\n' +
+          'Contoh: /transfer 0xb54eB756c51C40F7EeFE5FB750264bfC14B9e208 0.01\n\n' +
+          '💡 <b>Catatan:</b>\n' +
+          '• <amount> adalah jumlah BNB (contoh: 0.01 untuk 0.01 BNB)\n' +
+          '• Pastikan wallet bot punya BNB cukup (termasuk gas fee)',
+          { parse_mode: 'HTML' }
+        ).catch(() => {});
+        return;
+      }
+
+      try {
+        this.bot!.sendMessage(
+          chatId,
+          `💸 Transferring ${amount} BNB to <code>${toAddress}</code>...\n\n` +
+          `⏳ Please wait...`,
+          { parse_mode: 'HTML' }
+        ).catch(() => {});
+
+        const result = await this.tradingService.transferBNB(toAddress, amount);
+        
+        const successMessage = `✅ <b>Transfer Successful!</b>\n\n` +
+          `📍 To: <code>${toAddress}</code>\n` +
+          `💰 Amount: ${amount} BNB\n` +
+          `🔗 TX Hash: <code>${result.txHash}</code>\n\n` +
+          `📊 View on BSCScan:\n` +
+          `https://bscscan.com/tx/${result.txHash}`;
+        
+        this.bot!.sendMessage(chatId, successMessage, { parse_mode: 'HTML' }).catch(() => {});
+      } catch (error: any) {
+        logger.error('Error in transfer command:', error);
+        this.bot!.sendMessage(
+          chatId,
+          `❌ Transfer failed: ${error.message || 'Unknown error'}\n\n` +
+          `💡 <b>Tips:</b>\n` +
+          `• Pastikan wallet bot punya BNB cukup (termasuk gas fee)\n` +
+          `• Pastikan address tujuan benar (format: 0x...)\n` +
+          `• Cek balance dengan /balance`,
+          { parse_mode: 'HTML' }
         ).catch(() => {});
       }
     });

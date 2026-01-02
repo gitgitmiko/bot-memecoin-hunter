@@ -43,10 +43,42 @@ class DexPriceMonitorService {
     // Try to initialize TradeService for auto-sell operations (optional)
     // If trade-engine files are not available, this service will only detect sell conditions
     try {
-      const pancakeswapModule = require('../../shared/libs/pancakeswap');
-      const BSC_ADDRESSES = pancakeswapModule.BSC_ADDRESSES;
-      const tradeModule = require('../../trade-engine/src/services/trade.service');
-      const TradeService = tradeModule.TradeService;
+      const path = require('path');
+      const appRoot = path.resolve(__dirname, '../..'); // /app
+      
+      // Load PancakeSwap from shared (compiled JS should be available)
+      // Since shared is copied but not compiled, we need to use ts-node for TypeScript files
+      // But BSC_ADDRESSES is exported as const, so we can require the JS if compiled
+      // For now, try to get BSC_ADDRESSES from trade-engine dist which should have it compiled
+      const tradeServiceDistPath = path.join(appRoot, 'trade-engine', 'dist', 'src', 'services', 'trade.service');
+      
+      // Load compiled TradeService (should be available from build step)
+      let TradeService;
+      let BSC_ADDRESSES_BUSD;
+      try {
+        logger.debug(`Trying to load TradeService from dist: ${tradeServiceDistPath}`);
+        const tradeModule = require(tradeServiceDistPath);
+        TradeService = tradeModule.TradeService;
+        
+        // Also try to get BSC_ADDRESSES from shared (if available)
+        try {
+          const sharedPancakeswapPath = path.join(appRoot, 'shared', 'libs', 'pancakeswap');
+          const pancakeswapModule = require(sharedPancakeswapPath);
+          BSC_ADDRESSES_BUSD = pancakeswapModule.BSC_ADDRESSES?.BUSD;
+        } catch (pancakeError) {
+          // Fallback to hardcoded BUSD address
+          BSC_ADDRESSES_BUSD = '0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56';
+        }
+        
+        if (!BSC_ADDRESSES_BUSD) {
+          BSC_ADDRESSES_BUSD = '0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56'; // Fallback
+        }
+        
+        logger.info('TradeService loaded from dist');
+      } catch (distError: any) {
+        logger.warn(`TradeService dist not found: ${distError.message}. Auto-sell will be disabled.`);
+        throw new Error(`TradeService compiled files not found. Please ensure trade-engine is built.`);
+      }
       
       const rpcUrl = process.env.BSC_RPC_URL || 'https://bsc-dataseed1.binance.org/';
       const mnemonic = process.env.WALLET_MNEMONIC;
@@ -58,15 +90,18 @@ class DexPriceMonitorService {
         this.tradeService = new TradeService(
           rpcUrl,
           walletKey,
-          BSC_ADDRESSES.BUSD,
+          BSC_ADDRESSES_BUSD,
           accountIndex
         );
-        logger.info('TradeService initialized for auto-sell operations');
+        logger.info('✅ TradeService initialized for auto-sell operations');
       } else {
         logger.warn('Wallet credentials or TradeService not found. Auto-sell will be disabled. This service will only detect sell conditions.');
       }
     } catch (error: any) {
-      logger.warn(`TradeService not available (files may not be mounted): ${error.message}. Auto-sell will be disabled. This service will only detect sell conditions.`);
+      logger.warn(`TradeService not available: ${error.message}. Auto-sell will be disabled. This service will only detect sell conditions.`);
+      if (error.stack) {
+        logger.debug(`TradeService error stack: ${error.stack}`);
+      }
     }
 
     logger.info(`Price monitor initialized with interval: ${this.intervalMs}ms`);

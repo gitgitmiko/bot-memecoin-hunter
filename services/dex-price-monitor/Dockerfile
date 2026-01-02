@@ -1,3 +1,13 @@
+# Multi-stage build: First build trade-engine
+FROM node:20-alpine AS trade-engine-builder
+WORKDIR /build
+COPY trade-engine/package*.json ./
+COPY trade-engine/tsconfig.json ./
+COPY trade-engine/src ./src
+COPY shared ./shared
+RUN npm install && npm run build
+
+# Main build stage
 FROM node:20-alpine
 
 # Set working directory
@@ -16,16 +26,10 @@ COPY dex-price-monitor/src ./src
 # Copy shared folder (from services directory context)
 COPY shared ./shared
 
-# Copy trade-engine source for TradeService (needed for auto-sell operations)
-COPY trade-engine/src ./trade-engine/src
+# Copy compiled trade-engine dist from builder stage
+COPY --from=trade-engine-builder /build/dist ./trade-engine/dist
 
-# Copy shared to trade-engine so relative imports work (../../shared)
-RUN cp -r shared trade-engine/shared || true
-
-# Keep trade-engine/src for runtime (needed for dynamic require)
-# Files will be available at runtime via volume mount or copy
-
-# Build TypeScript
+# Build TypeScript for dex-price-monitor
 RUN npm run build
 
 # Remove dev dependencies
@@ -47,5 +51,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
   CMD node healthcheck.js || exit 1
 
 # Start application
-CMD ["node", "dist/index.js"]
-
+CMD ["node", "dist/src/index.js"]

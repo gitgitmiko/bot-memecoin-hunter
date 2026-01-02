@@ -110,11 +110,29 @@ export class TradeService {
         `Buying $${amountUsd} of token ${tokenAddress} at price $${currentPrice}`
       );
 
-      // Execute swap via PancakeSwap
-      const swapResult = await this.pancakeswap.swapExactTokensForTokens(
+      // Get BNB price in USD to convert USD amount to BNB
+      let bnbPriceUSD = 0;
+      try {
+        const axios = (await import('axios')).default;
+        const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=binancecoin&vs_currencies=usd', {
+          timeout: 5000,
+        });
+        if (response.data?.binancecoin?.usd) {
+          bnbPriceUSD = response.data.binancecoin.usd;
+        }
+      } catch (error: any) {
+        logger.warn(`Failed to fetch BNB price from CoinGecko: ${error.message}. Using fallback price 300 USD`);
+        bnbPriceUSD = 300; // Fallback approximate BNB price
+      }
+
+      // Convert USD amount to BNB amount
+      const amountBNB = amountUsd / bnbPriceUSD;
+      logger.info(`Converting $${amountUsd} to ${amountBNB.toFixed(8)} BNB (BNB price: $${bnbPriceUSD})`);
+
+      // Execute swap via PancakeSwap using BNB
+      const swapResult = await this.pancakeswap.swapExactBNBForTokens(
         tokenAddress,
-        amountUsd,
-        BSC_ADDRESSES.BUSD,
+        amountBNB,
         slippage
       );
 

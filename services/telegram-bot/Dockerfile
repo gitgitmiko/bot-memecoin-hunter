@@ -1,3 +1,13 @@
+# Multi-stage build: First build trade-engine
+FROM node:20-alpine AS trade-engine-builder
+WORKDIR /build
+COPY trade-engine/package*.json ./
+COPY trade-engine/tsconfig.json ./
+COPY trade-engine/src ./src
+COPY shared ./shared
+RUN npm install && npm run build
+
+# Main build stage
 FROM node:20-alpine
 
 # Set working directory
@@ -16,11 +26,8 @@ COPY telegram-bot/src ./src
 # Copy shared libraries
 COPY shared ./shared
 
-# Copy trade-engine source for TradeService (needed for buy/sell operations)
-COPY trade-engine/src ./trade-engine/src
-
-# Copy shared to trade-engine so relative imports work (../../shared)
-RUN cp -r shared trade-engine/shared || true
+# Copy compiled trade-engine dist from builder stage
+COPY --from=trade-engine-builder /build/dist ./trade-engine/dist
 
 # Build TypeScript
 RUN npm run build

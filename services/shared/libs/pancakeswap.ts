@@ -3,7 +3,9 @@
  * BSC Mainnet Integration
  */
 
+// @ts-ignore - Dependencies are available at runtime from services that use this module
 import { ethers } from 'ethers';
+// @ts-ignore - Dependencies are available at runtime from services that use this module
 import winston from 'winston';
 import { createWalletFromMnemonic } from '../utils/wallet';
 
@@ -176,6 +178,79 @@ export class PancakeSwapHelper {
   }
 
   /**
+   * Swap BNB for Token (using swapExactETHForTokens)
+   */
+  async swapExactBNBForTokens(
+    tokenAddress: string,
+    amountBNB: number,
+    slippage: number = 5, // 5% default
+    deadlineMinutes: number = 20
+  ): Promise<SwapResult> {
+    try {
+      // Path: WBNB -> Token (BNB will be wrapped to WBNB automatically by router)
+      const path = [BSC_ADDRESSES.WBNB, tokenAddress];
+
+      // Convert BNB amount to Wei
+      const amountInWei = ethers.parseEther(amountBNB.toString());
+
+      // Get expected amount out
+      // Path has 2 tokens: [WBNB, Token], so amounts array will have 2 values
+      // amounts[0] = input (WBNB), amounts[1] = output (Token)
+      const amounts = await this.getAmountsOut(
+        amountBNB.toString(),
+        path
+      );
+      const expectedAmountOut = amounts[1]; // Token amount
+
+      // Calculate minimum amount out with slippage
+      const slippageMultiplier = BigInt(100 - slippage);
+      const amountOutMin = (expectedAmountOut * slippageMultiplier) / BigInt(100);
+
+      // Deadline
+      const deadline = Math.floor(Date.now() / 1000) + deadlineMinutes * 60;
+
+      // Execute swap using swapExactETHForTokens (BNB = native ETH on BSC)
+      logger.info(
+        `Swapping ${amountBNB} BNB for token ${tokenAddress} with ${slippage}% slippage`
+      );
+
+      const tx = await this.router.swapExactETHForTokens(
+        amountOutMin,
+        path,
+        this.wallet.address,
+        deadline,
+        {
+          value: amountInWei,
+          gasLimit: 500000, // Safe gas limit
+        }
+      );
+
+      logger.info(`Swap transaction submitted: ${tx.hash}`);
+      const receipt = await tx.wait();
+
+      if (!receipt) {
+        throw new Error('Transaction receipt not found');
+      }
+
+      logger.info(`Swap successful: ${tx.hash}`);
+
+      // Get token amount
+      const tokenDecimals = await this.getTokenDecimals(tokenAddress);
+      const tokenAmount = ethers.formatUnits(amounts[1], tokenDecimals);
+
+      return {
+        txHash: tx.hash,
+        amountIn: amountBNB.toString(),
+        amountOut: tokenAmount,
+        tokenAmount: tokenAmount,
+      };
+    } catch (error: any) {
+      logger.error('Error in swapExactBNBForTokens:', error);
+      throw new Error(`Swap failed: ${error.message || error}`);
+    }
+  }
+
+  /**
    * Swap BUSD/USDT for Token
    */
   async swapExactTokensForTokens(
@@ -186,8 +261,9 @@ export class PancakeSwapHelper {
     deadlineMinutes: number = 20
   ): Promise<SwapResult> {
     try {
-      // Path: BUSD/USDT -> Token
-      const path = [stablecoinAddress, tokenAddress];
+      // Path: BUSD/USDT -> WBNB -> Token (most tokens pair with WBNB, not stablecoins directly)
+      // Using WBNB as intermediate token is the standard approach on PancakeSwap
+      const path = [stablecoinAddress, BSC_ADDRESSES.WBNB, tokenAddress];
 
       // Get stablecoin decimals (usually 18 for BUSD/USDT on BSC)
       const stablecoinDecimals = await this.getTokenDecimals(stablecoinAddress);
@@ -200,11 +276,13 @@ export class PancakeSwapHelper {
       await this.approveToken(stablecoinAddress, amountUsd.toString());
 
       // Get expected amount out
+      // Path has 3 tokens: [BUSD, WBNB, Token], so amounts array will have 3 values
+      // amounts[0] = input (BUSD), amounts[1] = WBNB, amounts[2] = output (Token)
       const amounts = await this.getAmountsOut(
         amountUsd.toString(),
         path
       );
-      const expectedAmountOut = amounts[1];
+      const expectedAmountOut = amounts[2]; // Token amount (last in path)
 
       // Calculate minimum amount out with slippage
       const slippageMultiplier = BigInt(100 - slippage);
@@ -239,8 +317,9 @@ export class PancakeSwapHelper {
       logger.info(`Swap successful: ${tx.hash}`);
 
       // Get token amount (from event logs or calculate)
+      // Path: [BUSD, WBNB, Token], so amounts[2] is the token amount
       const tokenDecimals = await this.getTokenDecimals(tokenAddress);
-      const tokenAmount = ethers.formatUnits(amounts[1], tokenDecimals);
+      const tokenAmount = ethers.formatUnits(amounts[2], tokenDecimals);
 
       return {
         txHash: tx.hash,

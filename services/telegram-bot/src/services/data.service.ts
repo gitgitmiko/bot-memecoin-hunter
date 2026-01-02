@@ -266,6 +266,65 @@ export class DataService {
   }
 
   /**
+   * Get new coins by chain ID (ordered by discovered_at DESC)
+   */
+  async getNewCoinsByChain(chainId: number, limit: number = 10): Promise<CoinInfo[]> {
+    try {
+      const result = await pool.query(
+        `SELECT 
+          c.id,
+          c.address,
+          c.symbol,
+          c.name,
+          c.chain_id,
+          c.liquidity,
+          c.discovered_at,
+          c.created_at,
+          a.overall_score,
+          a.price_score,
+          a.volume_score,
+          a.social_score,
+          a.risk_score
+        FROM coins c
+        LEFT JOIN LATERAL (
+          SELECT 
+            overall_score,
+            price_score,
+            volume_score,
+            social_score,
+            risk_score
+          FROM analyses
+          WHERE coin_id = c.id
+          ORDER BY created_at DESC
+          LIMIT 1
+        ) a ON true
+        WHERE c.chain_id = $1
+        ORDER BY COALESCE(c.discovered_at, c.created_at) DESC
+        LIMIT $2`,
+        [chainId, limit]
+      );
+
+      return result.rows.map((row) => ({
+        id: row.id,
+        address: row.address,
+        symbol: row.symbol,
+        name: row.name,
+        chainId: row.chain_id,
+        liquidity: row.liquidity ? parseFloat(row.liquidity) : null,
+        createdAt: row.discovered_at || row.created_at,
+        overallScore: row.overall_score,
+        priceScore: row.price_score,
+        volumeScore: row.volume_score,
+        socialScore: row.social_score,
+        riskScore: row.risk_score,
+      }));
+    } catch (error) {
+      logger.error(`Error getting new coins for chain ${chainId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
    * Get chain name from chain ID
    */
   getChainName(chainId: number): string {

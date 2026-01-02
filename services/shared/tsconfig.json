@@ -3,8 +3,6 @@
     "target": "ES2020",
     "module": "commonjs",
     "lib": ["ES2020"],
-    "outDir": "./dist",
-    "baseUrl": ".",
     "strict": false,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -14,11 +12,17 @@
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
-    "paths": {
-      "../../shared/*": ["./shared/*"]
-    }
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noImplicitReturns": false,
+    "noFallthroughCasesInSwitch": true,
+    "typeRoots": [
+      "../telegram-bot/node_modules/@types",
+      "../trade-engine/node_modules/@types",
+      "../node_modules/@types"
+    ]
   },
-  "include": ["src/**/*", "shared/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "include": ["**/*"],
+  "exclude": ["node_modules"]
 }
 

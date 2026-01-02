@@ -14,8 +14,20 @@ function loadTradeService() {
   if (TradeServiceClass) return;
   
   try {
-    const tradeModule = require('../../../trade-engine/src/services/trade.service');
+    // Try to load from compiled dist first (preferred)
+    let tradeModule;
+    try {
+      tradeModule = require('../../../trade-engine/dist/src/services/trade.service');
+      logger.info('✅ TradeService loaded from dist');
+    } catch (distError) {
+      // If dist not available, log warning
+      logger.warn('TradeService dist not found, cannot load TradeService');
+      throw new Error('TradeService compiled files not found. Please ensure trade-engine is built.');
+    }
     TradeServiceClass = tradeModule.TradeService;
+    if (TradeServiceClass) {
+      logger.info('✅ TradeService class loaded successfully');
+    }
   } catch (error: any) {
     logger.warn('TradeService not available:', error.message);
   }
@@ -34,7 +46,7 @@ export class TradingService {
    * Initialize trading service
    */
   async initialize(): Promise<void> {
-    logger.info('Trading service initialized');
+    logger.info('Initializing trading service...');
     
     // Initialize PancakeSwap helper for balance checks
     try {
@@ -42,35 +54,47 @@ export class TradingService {
       const mnemonicOrPrivateKey = process.env.WALLET_MNEMONIC || process.env.WALLET_PRIVATE_KEY;
       const accountIndex = parseInt(process.env.WALLET_ACCOUNT_INDEX || '0');
       
-      if (mnemonicOrPrivateKey) {
-        this.pancakeswap = new PancakeSwapHelper(
-          rpcUrl,
-          mnemonicOrPrivateKey,
-          BSC_ADDRESSES.ROUTER_V2,
-          accountIndex
-        );
-        logger.info('PancakeSwap helper initialized');
-        
-        // Try to load TradeService dynamically at runtime
-        loadTradeService();
-        
-        // Initialize TradeService for buy/sell operations
-        if (TradeServiceClass) {
+      if (!mnemonicOrPrivateKey) {
+        logger.warn('⚠️ Wallet credentials not found (WALLET_MNEMONIC or WALLET_PRIVATE_KEY). Trading operations will not be available.');
+        return;
+      }
+      
+      logger.info(`🔑 Wallet credentials found. Account index: ${accountIndex}`);
+      
+      // Initialize PancakeSwap helper
+      this.pancakeswap = new PancakeSwapHelper(
+        rpcUrl,
+        mnemonicOrPrivateKey,
+        BSC_ADDRESSES.ROUTER_V2,
+        accountIndex
+      );
+      
+      const walletAddress = this.pancakeswap.getWalletAddress();
+      logger.info(`✅ PancakeSwap helper initialized. Wallet address: ${walletAddress}`);
+      
+      // Try to load TradeService dynamically at runtime
+      loadTradeService();
+      
+      // Initialize TradeService for buy/sell operations
+      if (TradeServiceClass) {
+        try {
           this.tradeService = new TradeServiceClass(
             rpcUrl,
             mnemonicOrPrivateKey,
             BSC_ADDRESSES.BUSD,
             accountIndex
           );
-          logger.info('TradeService initialized for buy/sell operations');
-        } else {
-          logger.warn('TradeService not available. Buy/sell operations will be disabled.');
+          logger.info(`✅ TradeService initialized for buy/sell operations. Wallet address: ${walletAddress}`);
+        } catch (error: any) {
+          logger.error(`❌ Failed to initialize TradeService: ${error.message}`);
+          logger.error(error);
         }
       } else {
-        logger.warn('Wallet credentials not found. Trading operations will not be available.');
+        logger.warn('⚠️ TradeService class not available. Buy/sell operations will be disabled.');
       }
     } catch (error: any) {
-      logger.warn(`Failed to initialize trading services: ${error.message}`);
+      logger.error(`❌ Failed to initialize trading services: ${error.message}`);
+      logger.error(error);
     }
   }
 
@@ -123,7 +147,13 @@ export class TradingService {
    * Buy token
    */
   async buy(tokenAddress: string, amountUsd: number = 10, slippage: number = 5) {
-    // Try to load TradeService if not already loaded
+    // Try to initialize if not already initialized
+    if (!this.tradeService) {
+      logger.warn('TradeService not initialized. Attempting to initialize...');
+      await this.initialize();
+    }
+    
+    // Try to load TradeService if still not loaded
     if (!this.tradeService) {
       loadTradeService();
       
@@ -132,22 +162,27 @@ export class TradingService {
           const rpcUrl = process.env.BSC_RPC_URL || 'https://bsc-dataseed.binance.org/';
           const mnemonicOrPrivateKey = process.env.WALLET_MNEMONIC || process.env.WALLET_PRIVATE_KEY;
           const accountIndex = parseInt(process.env.WALLET_ACCOUNT_INDEX || '0');
-          if (mnemonicOrPrivateKey) {
-            this.tradeService = new TradeServiceClass(
-              rpcUrl,
-              mnemonicOrPrivateKey,
-              BSC_ADDRESSES.BUSD,
-              accountIndex
-            );
+          
+          if (!mnemonicOrPrivateKey) {
+            throw new Error('WALLET_MNEMONIC or WALLET_PRIVATE_KEY environment variable is required');
           }
+          
+          this.tradeService = new TradeServiceClass(
+            rpcUrl,
+            mnemonicOrPrivateKey,
+            BSC_ADDRESSES.BUSD,
+            accountIndex
+          );
+          logger.info('TradeService initialized successfully');
         }
       } catch (error: any) {
-        throw new Error(`TradeService not available: ${error.message}`);
+        logger.error(`Failed to initialize TradeService: ${error.message}`);
+        throw new Error(`TradeService not available: ${error.message}. Please check WALLET_MNEMONIC or WALLET_PRIVATE_KEY environment variable.`);
       }
     }
     
     if (!this.tradeService) {
-      throw new Error('TradeService not initialized. Wallet credentials may be missing.');
+      throw new Error('TradeService not initialized. Please check WALLET_MNEMONIC or WALLET_PRIVATE_KEY environment variable.');
     }
     
     try {
@@ -169,7 +204,13 @@ export class TradingService {
    * Sell position by token address
    */
   async sellByToken(tokenAddress: string, slippage: number = 5) {
-    // Try to load TradeService if not already loaded
+    // Try to initialize if not already initialized
+    if (!this.tradeService) {
+      logger.warn('TradeService not initialized. Attempting to initialize...');
+      await this.initialize();
+    }
+    
+    // Try to load TradeService if still not loaded
     if (!this.tradeService) {
       loadTradeService();
       
@@ -178,22 +219,27 @@ export class TradingService {
           const rpcUrl = process.env.BSC_RPC_URL || 'https://bsc-dataseed.binance.org/';
           const mnemonicOrPrivateKey = process.env.WALLET_MNEMONIC || process.env.WALLET_PRIVATE_KEY;
           const accountIndex = parseInt(process.env.WALLET_ACCOUNT_INDEX || '0');
-          if (mnemonicOrPrivateKey) {
-            this.tradeService = new TradeServiceClass(
-              rpcUrl,
-              mnemonicOrPrivateKey,
-              BSC_ADDRESSES.BUSD,
-              accountIndex
-            );
+          
+          if (!mnemonicOrPrivateKey) {
+            throw new Error('WALLET_MNEMONIC or WALLET_PRIVATE_KEY environment variable is required');
           }
+          
+          this.tradeService = new TradeServiceClass(
+            rpcUrl,
+            mnemonicOrPrivateKey,
+            BSC_ADDRESSES.BUSD,
+            accountIndex
+          );
+          logger.info('TradeService initialized successfully');
         }
       } catch (error: any) {
-        throw new Error(`TradeService not available: ${error.message}`);
+        logger.error(`Failed to initialize TradeService: ${error.message}`);
+        throw new Error(`TradeService not available: ${error.message}. Please check WALLET_MNEMONIC or WALLET_PRIVATE_KEY environment variable.`);
       }
     }
     
     if (!this.tradeService) {
-      throw new Error('TradeService not initialized. Wallet credentials may be missing.');
+      throw new Error('TradeService not initialized. Please check WALLET_MNEMONIC or WALLET_PRIVATE_KEY environment variable.');
     }
     
     try {
@@ -243,22 +289,214 @@ export class TradingService {
   /**
    * Get balance (BUSD and BNB)
    */
-  async getBalance(): Promise<{ busd: string; bnb: string }> {
+  async getBalance(): Promise<{ busd: string; bnb: string; walletAddress: string; totalValueUSD: number }> {
+    // Try to initialize if not already initialized
     if (!this.pancakeswap) {
-      throw new Error('PancakeSwap helper not initialized. Wallet credentials may be missing.');
+      logger.warn('PancakeSwap helper not initialized. Attempting to initialize...');
+      await this.initialize();
+      
+      if (!this.pancakeswap) {
+        throw new Error('PancakeSwap helper not initialized. Please check WALLET_MNEMONIC or WALLET_PRIVATE_KEY environment variable.');
+      }
     }
     
     try {
+      const walletAddress = this.pancakeswap.getWalletAddress();
+      logger.info(`Getting balance for wallet: ${walletAddress}`);
+      
       const busdBalance = await this.pancakeswap.getTokenBalance(BSC_ADDRESSES.BUSD);
       const bnbBalance = await this.pancakeswap.getBNBBalance();
+      
+      // Get BNB price in USD
+      let bnbPriceUSD = 0;
+      try {
+        const axios = (await import('axios')).default;
+        const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=binancecoin&vs_currencies=usd', {
+          timeout: 5000,
+        });
+        if (response.data?.binancecoin?.usd) {
+          bnbPriceUSD = response.data.binancecoin.usd;
+        }
+      } catch (error: any) {
+        logger.warn('Failed to fetch BNB price from CoinGecko:', error.message);
+        // Fallback: use approximate price (will be inaccurate but better than nothing)
+        bnbPriceUSD = 300; // Approximate BNB price
+      }
+      
+      // Calculate total value in USD
+      const busdValue = parseFloat(busdBalance);
+      const bnbValue = parseFloat(bnbBalance) * bnbPriceUSD;
+      const totalValueUSD = busdValue + bnbValue;
+      
+      logger.info(`Balance retrieved - BUSD: ${busdBalance}, BNB: ${bnbBalance}, Total USD: ${totalValueUSD.toFixed(2)}`);
+      
       return {
         busd: busdBalance,
         bnb: bnbBalance,
+        walletAddress: walletAddress,
+        totalValueUSD: totalValueUSD,
       };
     } catch (error: any) {
       logger.error('Error getting wallet balance:', error);
       throw new Error(`Failed to get balance: ${error.message}`);
     }
+  }
+
+  /**
+   * Get balance by address (read-only, no private key needed)
+   */
+  async getBalanceByAddress(address: string): Promise<{ busd: string; bnb: string; walletAddress: string; totalValueUSD: number }> {
+    try {
+      const { ethers } = await import('ethers');
+      const rpcUrl = process.env.BSC_RPC_URL || 'https://bsc-dataseed.binance.org/';
+      const provider = new ethers.JsonRpcProvider(rpcUrl);
+
+      // Validate address
+      if (!ethers.isAddress(address)) {
+        throw new Error('Invalid address format');
+      }
+
+      const normalizedAddress = ethers.getAddress(address); // Get checksum address
+
+      // Get BNB balance
+      const bnbBalance = await provider.getBalance(normalizedAddress);
+      const bnbBalanceFormatted = ethers.formatEther(bnbBalance);
+
+      // Get BUSD balance
+      const busdAddress = BSC_ADDRESSES.BUSD;
+      const erc20Abi = ['function balanceOf(address account) external view returns (uint256)'];
+      const busdContract = new ethers.Contract(busdAddress, erc20Abi, provider);
+      const busdBalance = await busdContract.balanceOf(normalizedAddress);
+      const busdBalanceFormatted = ethers.formatEther(busdBalance);
+
+      // Get BNB price in USD
+      let bnbPriceUSD = 0;
+      try {
+        const axios = (await import('axios')).default;
+        const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=binancecoin&vs_currencies=usd', {
+          timeout: 5000,
+        });
+        if (response.data?.binancecoin?.usd) {
+          bnbPriceUSD = response.data.binancecoin.usd;
+        }
+      } catch (error: any) {
+        logger.warn('Failed to fetch BNB price from CoinGecko:', error.message);
+        // Fallback: use approximate price
+        bnbPriceUSD = 300; // Approximate BNB price
+      }
+
+      // Calculate total value in USD
+      const busdValue = parseFloat(busdBalanceFormatted);
+      const bnbValue = parseFloat(bnbBalanceFormatted) * bnbPriceUSD;
+      const totalValueUSD = busdValue + bnbValue;
+
+      return {
+        busd: busdBalanceFormatted,
+        bnb: bnbBalanceFormatted,
+        walletAddress: normalizedAddress,
+        totalValueUSD: totalValueUSD,
+      };
+    } catch (error: any) {
+      logger.error('Error getting balance by address:', error);
+      throw new Error(`Failed to get balance: ${error.message}`);
+    }
+  }
+
+  /**
+   * Transfer BNB to address
+   */
+  async transferBNB(toAddress: string, amountBNB: number): Promise<{ txHash: string }> {
+    if (!this.pancakeswap) {
+      await this.initialize();
+      if (!this.pancakeswap) {
+        throw new Error('PancakeSwap helper not initialized. Wallet credentials may be missing.');
+      }
+    }
+
+    try {
+      const { ethers } = await import('ethers');
+      const rpcUrl = process.env.BSC_RPC_URL || 'https://bsc-dataseed.binance.org/';
+      const mnemonicOrPrivateKey = process.env.WALLET_MNEMONIC || process.env.WALLET_PRIVATE_KEY;
+      const accountIndex = parseInt(process.env.WALLET_ACCOUNT_INDEX || '0');
+      
+      if (!mnemonicOrPrivateKey) {
+        throw new Error('Wallet credentials not found');
+      }
+
+      // Create wallet
+      let wallet: any;
+      if (mnemonicOrPrivateKey.trim().includes(' ')) {
+        // Mnemonic
+        const { createWalletFromMnemonic } = await import('../../shared/utils/wallet');
+        wallet = createWalletFromMnemonic(mnemonicOrPrivateKey, undefined, accountIndex);
+      } else {
+        // Private key
+        wallet = new ethers.Wallet(mnemonicOrPrivateKey);
+      }
+
+      const provider = new ethers.JsonRpcProvider(rpcUrl);
+      wallet = wallet.connect(provider);
+      
+      // Validate address
+      if (!ethers.isAddress(toAddress)) {
+        throw new Error('Invalid recipient address format');
+      }
+
+      const normalizedAddress = ethers.getAddress(toAddress);
+
+      // Convert amount to Wei
+      const amountWei = ethers.parseEther(amountBNB.toString());
+
+      // Check balance
+      const balance = await provider.getBalance(wallet.address);
+      if (balance < amountWei) {
+        throw new Error(`Insufficient BNB balance. Available: ${ethers.formatEther(balance)} BNB, Required: ${amountBNB} BNB`);
+      }
+
+      // Get gas price
+      const feeData = await provider.getFeeData();
+      const gasPrice = feeData.gasPrice;
+      if (!gasPrice) {
+        throw new Error('Unable to fetch gas price');
+      }
+
+      const gasLimit = 21000n; // Standard BNB transfer
+      
+      // Send transaction
+      logger.info(`Transferring ${amountBNB} BNB from ${wallet.address} to ${normalizedAddress}`);
+      const tx = await wallet.sendTransaction({
+        to: normalizedAddress,
+        value: amountWei,
+        gasLimit: gasLimit,
+        gasPrice: gasPrice,
+      });
+
+      logger.info(`Transfer transaction submitted: ${tx.hash}`);
+      const receipt = await tx.wait();
+
+      if (!receipt) {
+        throw new Error('Transaction receipt not found');
+      }
+
+      logger.info(`Transfer successful: ${tx.hash}`);
+
+      return {
+        txHash: tx.hash,
+      };
+    } catch (error: any) {
+      logger.error('Error transferring BNB:', error);
+      throw new Error(`Failed to transfer BNB: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get wallet address
+   */
+  getWalletAddress(): string | null {
+    if (!this.pancakeswap) {
+      return null;
+    }
+    return this.pancakeswap.getWalletAddress();
   }
 
   /**

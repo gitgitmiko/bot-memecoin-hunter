@@ -352,15 +352,11 @@ services:
       - TZ=${TIMEZONE:-Asia/Jakarta}
     volumes:
       - price_monitor_logs:/app/logs
-      - ./services/dex-price-monitor:/app
-      - ./services/trade-engine:/app/trade-engine
       - ./services/shared:/app/shared
     networks:
       - memecoin-network
     depends_on:
       postgres:
-        condition: service_healthy
-      trade-engine:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "healthcheck.js"]
