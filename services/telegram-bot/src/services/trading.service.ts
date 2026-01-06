@@ -131,6 +131,7 @@ export class TradingService {
   async getPositions(status?: PositionStatus) {
     if (status) {
       if (status === PositionStatus.OPEN) {
+        // Always get fresh data from database (no caching)
         return await this.positionService.getOpenPositions();
       }
     }
@@ -1204,6 +1205,107 @@ export class TradingService {
       };
     } catch (error: any) {
       logger.error(`Error swapping BUSD to BNB: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Refresh prices for all open positions
+   */
+  async refreshPositionsPrices(): Promise<void> {
+    try {
+      const axios = require('axios');
+      const { pool } = await import('../config/database');
+      const DEXSCREENER_API = 'https://api.dexscreener.com/latest/dex/tokens';
+      
+      // Get all open positions
+      const positions = await this.positionService.getOpenPositions();
+      
+      if (positions.length === 0) {
+        return;
+      }
+
+      logger.info(`Refreshing prices for ${positions.length} positions...`);
+
+      // Update each position price
+      for (const position of positions) {
+        try {
+          const response = await axios.get(`${DEXSCREENER_API}/${position.tokenAddress}`, {
+            timeout: 10000,
+          });
+
+          if (!response.data?.pairs || response.data.pairs.length === 0) {
+            logger.warn(`No price data found for token ${position.tokenAddress}`);
+            continue;
+          }
+
+          // Find pair on BSC
+          const bscPair = response.data.pairs.find(
+            (pair: any) => pair.chainId === 'bsc' || pair.chainId === '56'
+          );
+
+          if (!bscPair?.priceUsd) {
+            logger.warn(`No BSC price found for token ${position.tokenAddress}`);
+            continue;
+          }
+
+          const currentPrice = parseFloat(bscPair.priceUsd);
+          
+          // Update highest price if current is higher
+          let highestPrice = position.highestPriceEver;
+          if (currentPrice > highestPrice) {
+            highestPrice = currentPrice;
+          }
+
+          // Calculate profit floor (same logic as price-monitor service)
+          const investAmount = position.amountUsdInvested || 10;
+          // Threshold: highest_price >= 5x invest amount
+          const threshold = investAmount * 5;
+          let profitFloor: number | null = null;
+          
+          if (highestPrice >= threshold) {
+            // Jika highest_price >= 5x dan < 10x invest: floor = 2x invest
+            if (highestPrice >= threshold && highestPrice < investAmount * 10) {
+              profitFloor = investAmount * 2;
+            } else {
+              // Untuk >= 10x invest, gunakan formula: floor = Math.floor(highestPrice / (investAmount * 10)) * (investAmount * 5)
+              profitFloor = Math.floor(highestPrice / (investAmount * 10)) * (investAmount * 5);
+            }
+          }
+
+          // Update database
+          if (!position.id) {
+            logger.warn(`Position ID is missing for token ${position.tokenAddress}`);
+            continue;
+          }
+
+          const updateResult = await pool.query(
+            `UPDATE positions 
+            SET current_price_usd = $1, 
+                highest_price_ever = $2, 
+                profit_floor = $3,
+                updated_at = NOW()
+            WHERE id = $4`,
+            [currentPrice, highestPrice, profitFloor, position.id]
+          );
+
+          if (updateResult.rowCount === 0) {
+            logger.warn(`No rows updated for position ${position.id} (${position.tokenAddress})`);
+          } else {
+            logger.debug(`Updated position ${position.id}: price $${currentPrice}, highest $${highestPrice}`);
+          }
+
+          // Small delay to avoid rate limits
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        } catch (error: any) {
+          logger.warn(`Error refreshing price for position ${position.id} (${position.tokenAddress}): ${error.message}`);
+          // Continue with next position
+        }
+      }
+
+      logger.info(`Price refresh completed for ${positions.length} positions`);
+    } catch (error: any) {
+      logger.error(`Error refreshing positions prices: ${error.message}`);
       throw error;
     }
   }

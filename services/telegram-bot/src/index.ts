@@ -627,6 +627,25 @@ ${stats.latestAnalysisDate ? `📊 <b>Latest Analysis:</b> ${new Date(stats.late
     this.bot.onText(/\/positions/, async (msg) => {
       const chatId = msg.chat.id;
       try {
+        // Send "refreshing" message
+        const refreshingMsg = await this.bot!.sendMessage(chatId, '🔄 Memperbarui harga...').catch(() => null);
+        
+        // Refresh prices before displaying
+        try {
+          await this.tradingService.refreshPositionsPrices();
+          // Small delay to ensure database is updated
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        } catch (error: any) {
+          logger.warn(`Error refreshing prices: ${error.message}`);
+          // Continue anyway - will show cached data
+        }
+        
+        // Delete refreshing message
+        if (refreshingMsg) {
+          this.bot!.deleteMessage(chatId, refreshingMsg.message_id).catch(() => {});
+        }
+        
+        // Get fresh positions from database after refresh
         const positions = await this.tradingService.getPositions(PositionStatus.OPEN);
         
         if (positions.length === 0) {
