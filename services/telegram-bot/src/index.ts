@@ -102,10 +102,11 @@ I'll alert you when we discover high-scoring meme coins.
 
 <b>Trading Commands:</b>
 /positions - 📊 List all open positions
-/buy &lt;token&gt; - 💰 Buy $10 of token
+/buy &lt;token&gt; [amount] - 💰 Buy token (default $10, or specify amount)
 /status &lt;token&gt; - 📈 Get position status
 /sell &lt;token&gt; - 💸 Force sell position
 /balance [address] - 💵 Check wallet balance (BUSD & BNB), or check specific address (read-only)
+/swapbusdtobnb &lt;amount&gt; - 💱 Swap BUSD to BNB (useful when BNB balance is low)
 /transfer &lt;address&gt; &lt;amount&gt; - 💸 Transfer BNB from bot wallet to address
 /pnl - 📊 Total profit & loss
 /walletinfo [index] - 🔑 Show wallet address and test account indices
@@ -145,10 +146,11 @@ I'll alert you when we discover high-scoring meme coins.
 
 <b>Trading Commands:</b>
 /positions - 📊 List all open positions
-/buy &lt;token_address&gt; - 💰 Buy $10 of token (BSC only)
+/buy &lt;token_address&gt; [amount] - 💰 Buy token (default $10, or specify amount, BSC only)
 /status &lt;token_address&gt; - 📈 Get position status by token address
 /sell &lt;token_address&gt; - 💸 Force sell position
 /balance [address] - 💵 Check wallet balance (BUSD & BNB), or check specific address (read-only)
+/swapbusdtobnb &lt;amount&gt; - 💱 Swap BUSD to BNB (useful when BNB balance is low)
 /transfer &lt;address&gt; &lt;amount&gt; - 💸 Transfer BNB from bot wallet to address
 /pnl - 📊 Total profit & loss across all positions
 /walletinfo [index] - 🔑 Show wallet address and test account indices
@@ -635,12 +637,28 @@ ${stats.latestAnalysisDate ? `📊 <b>Latest Analysis:</b> ${new Date(stats.late
         let message = `📊 <b>Open Positions (${positions.length})</b>\n\n`;
         
         for (const pos of positions) {
+          // Get symbol from multiple sources if not available
+          let symbol = pos.symbol;
+          if (!symbol) {
+            try {
+              symbol = await this.tradingService.getTokenSymbol(
+                pos.tokenAddress,
+                pos.chainId,
+                pos.symbol,
+                pos.coinId
+              ) || 'N/A';
+            } catch (error: any) {
+              logger.warn(`Error getting symbol for ${pos.tokenAddress}:`, error);
+              symbol = 'N/A';
+            }
+          }
+
           const pnl = pos.currentPriceUsd && pos.buyPriceUsd 
             ? ((pos.currentPriceUsd - pos.buyPriceUsd) / pos.buyPriceUsd) * 100
             : 0;
           const pnlSign = pnl >= 0 ? '📈' : '📉';
           
-          message += `<b>${pos.symbol || 'N/A'}</b>\n`;
+          message += `<b>${symbol}</b>\n`;
           message += `📍 <code>${pos.tokenAddress}</code>\n`;
           message += `💰 Buy: $${pos.buyPriceUsd.toFixed(8)}\n`;
           message += `💵 Current: $${pos.currentPriceUsd?.toFixed(8) || 'N/A'}\n`;
@@ -668,46 +686,86 @@ ${stats.latestAnalysisDate ? `📊 <b>Latest Analysis:</b> ${new Date(stats.late
       }
     });
 
-    // /buy command - Buy token (supports address or symbol)
+    // /buy command - Buy token (supports address or symbol, with optional amount)
+    // Format: /buy <token_address_or_symbol> [amount]
+    // Example: /buy 0x123... 30 (buy $30 worth)
+    // Example: /buy 0x123... (buy $10 default)
     this.bot.onText(/\/buy\s+(.+)/, async (msg, match) => {
       const chatId = msg.chat.id;
       const input = match && match[1] ? match[1].trim() : '';
       
       if (!input) {
-        this.bot!.sendMessage(chatId, '❌ Please provide token address or symbol.\nUsage: /buy <token_address_or_symbol>').catch(() => {});
+        this.bot!.sendMessage(chatId, '❌ Please provide token address or symbol.\nUsage: /buy <token_address_or_symbol> [amount]\n\nExample:\n/buy 0x123...5678 30\n/buy TOKEN 50').catch(() => {});
         return;
       }
 
       try {
-        // Check if input is address (0x... with 40-42 hex chars) or symbol
-        let tokenAddress = input;
-        if (!input.startsWith('0x') || input.length < 40) {
-          // Try to find by symbol
-          this.bot!.sendMessage(chatId, `🔍 Looking up token address for symbol: ${input}...`).catch(() => {});
-          const foundAddress = await this.tradingService.findTokenAddressBySymbol(input, 56);
-          if (!foundAddress) {
-            this.bot!.sendMessage(chatId, `❌ Token "${input}" not found in database. Please use token address instead.\n\nUsage: /buy 0x1234...5678`).catch(() => {});
-            return;
+        // Parse input: split by space to get token and amount
+        const parts = input.split(/\s+/);
+        let tokenInput = parts[0];
+        let amountUsd = 10; // Default amount
+
+        // Check if second part is a number (amount)
+        if (parts.length > 1) {
+          const amountStr = parts[1];
+          const parsedAmount = parseFloat(amountStr);
+          
+          if (!isNaN(parsedAmount) && parsedAmount > 0) {
+            amountUsd = parsedAmount;
+          } else {
+            // If second part is not a number, treat it as part of token (for symbols with spaces)
+            tokenInput = input; // Use full input as token
           }
-          tokenAddress = foundAddress;
         }
 
-        // Validate address format
-        if (!tokenAddress.startsWith('0x') || tokenAddress.length !== 42) {
-          this.bot!.sendMessage(chatId, '❌ Invalid token address format. Must be 0x followed by 40 hex characters.').catch(() => {});
+        // Validate amount
+        if (amountUsd <= 0) {
+          this.bot!.sendMessage(chatId, '❌ Amount must be greater than 0.\nUsage: /buy <token_address_or_symbol> [amount]').catch(() => {});
           return;
         }
 
-        const walletAddress = this.tradingService.getWalletAddress();
+        if (amountUsd > 10000) {
+          this.bot!.sendMessage(chatId, '❌ Maximum buy amount is $10,000 for safety.\nPlease use a smaller amount.').catch(() => {});
+          return;
+        }
+
+        // Detect chain and validate address format
+        const isBSC = tokenInput.match(/^0x[a-fA-F0-9]{40}$/);
+        const isSolana = tokenInput.match(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/);
+        
+        let tokenAddress = tokenInput;
+        let chainName = '';
+        let chainId = 56; // Default to BSC
+        
+        if (!isBSC && !isSolana) {
+          // Try to find by symbol (only for BSC for now)
+          this.bot!.sendMessage(chatId, `🔍 Looking up token address for symbol: ${tokenInput}...`).catch(() => {});
+          const foundAddress = await this.tradingService.findTokenAddressBySymbol(tokenInput, 56);
+          if (!foundAddress) {
+            this.bot!.sendMessage(chatId, `❌ Token "${tokenInput}" not found in database. Please use token address instead.\n\nUsage:\n• BSC: /buy 0x1234...5678 [amount]\n• Solana: /buy ABC...XYZ [amount]`).catch(() => {});
+            return;
+          }
+          tokenAddress = foundAddress;
+          chainName = 'BSC';
+          chainId = 56;
+        } else if (isBSC) {
+          chainName = 'BSC';
+          chainId = 56;
+        } else if (isSolana) {
+          chainName = 'Solana';
+          chainId = 999;
+        }
+
+        const walletAddress = this.tradingService.getWalletAddress(chainId);
         const walletInfo = walletAddress ? `\n📍 Wallet: <code>${walletAddress}</code>` : '';
         
-        this.bot!.sendMessage(chatId, `💰 Buying $10 of token...\n📍 Token: <code>${tokenAddress}</code>${walletInfo}`, { parse_mode: 'HTML' }).catch(() => {});
+        this.bot!.sendMessage(chatId, `💰 Buying $${amountUsd} of token on ${chainName}...\n📍 Token: <code>${tokenAddress}</code>${walletInfo}`, { parse_mode: 'HTML' }).catch(() => {});
 
-        const result = await this.tradingService.buy(tokenAddress, 10, 5);
+        const result = await this.tradingService.buy(tokenAddress, amountUsd, 5);
         
         const successMessage = `✅ <b>Buy Successful!</b>\n\n` +
           `📍 Token: <code>${tokenAddress}</code>\n` +
-          `💰 Amount: $10\n` +
+          `💰 Amount: $${amountUsd}\n` +
           `📊 Position ID: ${result.positionId}\n` +
           `🔗 TX Hash: <code>${result.txHash}</code>\n\n` +
           `Use /status ${tokenAddress} to check position status.`;
@@ -715,11 +773,30 @@ ${stats.latestAnalysisDate ? `📊 <b>Latest Analysis:</b> ${new Date(stats.late
         this.bot!.sendMessage(chatId, successMessage, { parse_mode: 'HTML' }).catch(() => {});
       } catch (error: any) {
         logger.error('Error in buy command:', error);
-        const errorMessage = `❌ Buy failed: ${error.message || 'Unknown error'}\n\n` +
-          `💡 <b>Tips:</b>\n` +
+        // Determine chain for better error message (detect from input)
+        const isSolanaChain = input && input.match(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/);
+        const chainSpecificTips = isSolanaChain
+          ? `• Pastikan wallet memiliki cukup SOL untuk buy\n` +
+            `• Pastikan wallet memiliki cukup SOL untuk gas fee\n`
+          : `• Pastikan wallet memiliki cukup BUSD untuk buy\n` +
+            `• Pastikan wallet memiliki cukup BNB untuk gas fee\n`;
+
+        let errorMessage = `❌ Buy failed: ${error.message || 'Unknown error'}\n\n`;
+        
+        // Add specific error message for DNS/network issues
+        if (error.message && (error.message.includes('ENOTFOUND') || error.message.includes('DNS') || error.message.includes('fetch failed'))) {
+          errorMessage += `⚠️ <b>Network/DNS Issue Detected</b>\n\n`;
+          errorMessage += `Masalah: Tidak bisa terhubung ke Jupiter API (Solana DEX).\n\n`;
+          errorMessage += `💡 <b>Solusi:</b>\n`;
+          errorMessage += `• Cek koneksi internet server\n`;
+          errorMessage += `• Cek DNS settings di docker-compose.yml\n`;
+          errorMessage += `• Coba restart services: docker-compose restart telegram-bot trade-engine\n`;
+          errorMessage += `• Jika masalah berlanjut, cek firewall atau network restrictions\n\n`;
+        }
+        
+        errorMessage += `💡 <b>Tips:</b>\n` +
           `• Pastikan WALLET_MNEMONIC atau WALLET_PRIVATE_KEY sudah di-set di .env\n` +
-          `• Pastikan wallet memiliki cukup BUSD untuk buy\n` +
-          `• Pastikan wallet memiliki cukup BNB untuk gas fee\n` +
+          chainSpecificTips +
           `• Cek log untuk detail error lebih lanjut`;
         
         this.bot!.sendMessage(
@@ -818,6 +895,53 @@ ${stats.latestAnalysisDate ? `📊 <b>Latest Analysis:</b> ${new Date(stats.late
         this.bot!.sendMessage(
           chatId,
           `❌ Sell failed: ${error.message || 'Unknown error'}`
+        ).catch(() => {});
+      }
+    });
+
+    // /swapbusdtobnb command - Swap BUSD to BNB
+    // Format: /swapbusdtobnb <amount>
+    // Example: /swapbusdtobnb 10 (swap 10 BUSD to BNB)
+    this.bot.onText(/\/swapbusdtobnb\s+(\d+(?:\.\d+)?)/, async (msg, match) => {
+      const chatId = msg.chat.id;
+      const amountStr = match && match[1] ? match[1].trim() : '';
+      
+      if (!amountStr) {
+        this.bot!.sendMessage(chatId, '❌ Please provide BUSD amount.\nUsage: /swapbusdtobnb <amount>\n\nExample:\n/swapbusdtobnb 10\n/swapbusdtobnb 50.5').catch(() => {});
+        return;
+      }
+
+      const amountBUSD = parseFloat(amountStr);
+      
+      if (isNaN(amountBUSD) || amountBUSD <= 0) {
+        this.bot!.sendMessage(chatId, '❌ Invalid amount. Amount must be greater than 0.').catch(() => {});
+        return;
+      }
+
+      try {
+        this.bot!.sendMessage(chatId, `💱 Swapping ${amountBUSD.toFixed(2)} BUSD to BNB...`).catch(() => {});
+        
+        const result = await this.tradingService.swapBUSDToBNB(amountBUSD, 5);
+        
+        const successMessage = `✅ <b>Swap Successful!</b>\n\n` +
+          `💵 BUSD Swapped: ${amountBUSD.toFixed(2)}\n` +
+          `⚡ BNB Received: ${parseFloat(result.bnbReceived).toFixed(8)}\n` +
+          `🔗 TX Hash: <code>${result.txHash}</code>\n\n` +
+          `Use /balance to check your updated balance.`;
+        
+        this.bot!.sendMessage(chatId, successMessage, { parse_mode: 'HTML' }).catch(() => {});
+      } catch (error: any) {
+        logger.error('Error in swapbusdtobnb command:', error);
+        const errorMessage = `❌ Swap failed: ${error.message || 'Unknown error'}\n\n` +
+          `💡 <b>Tips:</b>\n` +
+          `• Pastikan wallet memiliki cukup BUSD\n` +
+          `• Pastikan wallet memiliki cukup BNB untuk gas fee\n` +
+          `• Cek log untuk detail error lebih lanjut`;
+        
+        this.bot!.sendMessage(
+          chatId,
+          errorMessage,
+          { parse_mode: 'HTML' }
         ).catch(() => {});
       }
     });

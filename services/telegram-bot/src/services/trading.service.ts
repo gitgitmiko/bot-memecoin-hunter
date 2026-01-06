@@ -16,20 +16,47 @@ function loadTradeService() {
   try {
     // Try to load from compiled dist first (preferred)
     let tradeModule;
-    try {
-      tradeModule = require('../../../trade-engine/dist/src/services/trade.service');
-      logger.info('✅ TradeService loaded from dist');
-    } catch (distError) {
-      // If dist not available, log warning
+    const path = require('path');
+    
+    // Try multiple paths
+    const possiblePaths = [
+      '/app/trade-engine/dist/src/services/trade.service', // Absolute path
+      path.join(process.cwd(), 'trade-engine', 'dist', 'src', 'services', 'trade.service'),
+      path.join(__dirname, '../../../trade-engine/dist/src/services/trade.service'),
+      '../../../trade-engine/dist/src/services/trade.service',
+    ];
+    
+    let loaded = false;
+    for (const tradePath of possiblePaths) {
+      try {
+        tradeModule = require(tradePath);
+        logger.info(`✅ TradeService loaded from: ${tradePath}`);
+        loaded = true;
+        break;
+      } catch (e) {
+        // Try next path
+        continue;
+      }
+    }
+    
+    if (!loaded) {
       logger.warn('TradeService dist not found, cannot load TradeService');
       throw new Error('TradeService compiled files not found. Please ensure trade-engine is built.');
     }
+    
     TradeServiceClass = tradeModule.TradeService;
     if (TradeServiceClass) {
       logger.info('✅ TradeService class loaded successfully');
+    } else {
+      logger.warn('TradeService class not found in module');
     }
   } catch (error: any) {
-    logger.warn('TradeService not available:', error.message);
+    // Don't fail completely - TradeService might have optional dependencies
+    // It will be loaded on-demand when buy/sell is called
+    logger.warn('TradeService not available (will retry on-demand):', error.message);
+    if (error.message.includes('@solana/web3.js')) {
+      logger.info('Note: Solana dependencies missing, but TradeService can still work for BSC');
+    }
   }
 }
 
@@ -144,9 +171,86 @@ export class TradingService {
   }
 
   /**
-   * Buy token
+   * Get token symbol from multiple sources
+   * 1. From position.symbol (if exists)
+   * 2. From coins table using coin_id (if exists)
+   * 3. From DexScreener API using token address
+   */
+  async getTokenSymbol(
+    tokenAddress: string,
+    chainId: number,
+    existingSymbol?: string,
+    coinId?: number
+  ): Promise<string | null> {
+    // 1. Use existing symbol if available
+    if (existingSymbol) {
+      return existingSymbol;
+    }
+
+    // 2. Try to get from coins table using coin_id
+    if (coinId) {
+      try {
+        const { pool } = await import('../config/database');
+        const result = await pool.query(
+          `SELECT symbol FROM coins WHERE id = $1`,
+          [coinId]
+        );
+        
+        if (result.rows.length > 0 && result.rows[0].symbol) {
+          return result.rows[0].symbol;
+        }
+      } catch (error: any) {
+        logger.warn(`Error getting symbol from coins table for coin_id ${coinId}:`, error);
+      }
+    }
+
+    // 3. Try to get from coins table using token address
+    try {
+      const { pool } = await import('../config/database');
+      const isSolana = chainId === 999;
+      const address = isSolana ? tokenAddress : tokenAddress.toLowerCase();
+      
+      const result = await pool.query(
+        `SELECT symbol FROM coins WHERE address = $1 AND chain_id = $2 ORDER BY created_at DESC LIMIT 1`,
+        [address, chainId]
+      );
+      
+      if (result.rows.length > 0 && result.rows[0].symbol) {
+        return result.rows[0].symbol;
+      }
+    } catch (error: any) {
+      logger.warn(`Error getting symbol from coins table for address ${tokenAddress}:`, error);
+    }
+
+    // 4. Try to get from DexScreener API
+    try {
+      const tokenInfo = await this.checkTokenOnPancakeSwap(tokenAddress);
+      if (tokenInfo.symbol && tokenInfo.symbol !== 'Unknown') {
+        return tokenInfo.symbol;
+      }
+    } catch (error: any) {
+      logger.warn(`Error getting symbol from DexScreener for ${tokenAddress}:`, error);
+    }
+
+    return null;
+  }
+
+  /**
+   * Buy token (supports BSC and Solana)
    */
   async buy(tokenAddress: string, amountUsd: number = 10, slippage: number = 5) {
+    // Detect chain from address
+    const chain = this.detectChain(tokenAddress);
+    let chainId = 56; // Default to BSC
+    
+    if (chain === 'solana') {
+      chainId = 999;
+    } else if (chain === 'bsc') {
+      chainId = 56;
+    } else {
+      throw new Error('Invalid token address format. Supported: BSC (0x...) or Solana (base58)');
+    }
+
     // Try to initialize if not already initialized
     if (!this.tradeService) {
       logger.warn('TradeService not initialized. Attempting to initialize...');
@@ -159,7 +263,10 @@ export class TradingService {
       
       try {
         if (TradeServiceClass) {
+          // TradeService constructor always uses BSC RPC URL for PancakeSwap helper
+          // Solana helper will be initialized lazy using SOLANA_RPC_URL from env
           const rpcUrl = process.env.BSC_RPC_URL || 'https://bsc-dataseed.binance.org/';
+          
           const mnemonicOrPrivateKey = process.env.WALLET_MNEMONIC || process.env.WALLET_PRIVATE_KEY;
           const accountIndex = parseInt(process.env.WALLET_ACCOUNT_INDEX || '0');
           
@@ -173,7 +280,7 @@ export class TradingService {
             BSC_ADDRESSES.BUSD,
             accountIndex
           );
-          logger.info('TradeService initialized successfully');
+          logger.info(`TradeService initialized successfully for chain ${chainId}`);
         }
       } catch (error: any) {
         logger.error(`Failed to initialize TradeService: ${error.message}`);
@@ -190,7 +297,7 @@ export class TradingService {
         tokenAddress,
         amountUsd,
         slippage,
-        chainId: 56, // BSC
+        chainId,
       });
       
       return result;
@@ -490,13 +597,74 @@ export class TradingService {
   }
 
   /**
-   * Get wallet address
+   * Get wallet address (supports BSC and Solana)
    */
-  getWalletAddress(): string | null {
-    if (!this.pancakeswap) {
-      return null;
+  getWalletAddress(chainId: number = 56): string | null {
+    if (chainId === 999) {
+      // Solana - need to create helper to get address
+      try {
+        const solanaRpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+        const mnemonicOrPrivateKey = process.env.WALLET_MNEMONIC || process.env.WALLET_PRIVATE_KEY;
+        const accountIndex = parseInt(process.env.WALLET_ACCOUNT_INDEX || '0');
+        
+        if (!mnemonicOrPrivateKey) {
+          logger.warn('Wallet credentials not found for Solana');
+          return null;
+        }
+
+        // Dynamically import SolanaJupiterHelper
+        try {
+          // Try multiple paths - file is TypeScript, so we need to use ts-node or compiled version
+          const path = require('path');
+          const possiblePaths = [
+            // Try from trade-engine dist (compiled)
+            '/app/trade-engine/dist/shared/libs/solana-jupiter',
+            path.join(process.cwd(), 'trade-engine', 'dist', 'shared', 'libs', 'solana-jupiter'),
+            path.join(__dirname, '../../../../trade-engine/dist/shared/libs/solana-jupiter'),
+            // Try source TypeScript (might work with ts-node)
+            path.join(process.cwd(), 'shared', 'libs', 'solana-jupiter'),
+            '/app/shared/libs/solana-jupiter',
+            path.join(__dirname, '../../../shared/libs/solana-jupiter'),
+          ];
+          
+          let SolanaJupiterHelper: any = null;
+          for (const solanaPath of possiblePaths) {
+            try {
+              const solanaModule = require(solanaPath);
+              SolanaJupiterHelper = solanaModule.SolanaJupiterHelper;
+              if (SolanaJupiterHelper) {
+                logger.debug(`SolanaJupiterHelper loaded from: ${solanaPath}`);
+                break;
+              }
+            } catch (e: any) {
+              // Try next path
+              continue;
+            }
+          }
+          
+          if (!SolanaJupiterHelper) {
+            logger.warn('SolanaJupiterHelper not found in any path. Wallet address will not be displayed for Solana.');
+            return null;
+          }
+          
+          const solanaHelper = new SolanaJupiterHelper(solanaRpcUrl, mnemonicOrPrivateKey, accountIndex);
+          return solanaHelper.getWalletAddress();
+        } catch (error: any) {
+          logger.error(`Failed to get Solana wallet address: ${error.message}`);
+          logger.error(`Error stack: ${error.stack}`);
+          return null;
+        }
+      } catch (error: any) {
+        logger.error(`Error getting Solana wallet address: ${error.message}`);
+        return null;
+      }
+    } else {
+      // BSC
+      if (!this.pancakeswap) {
+        return null;
+      }
+      return this.pancakeswap.getWalletAddress();
     }
-    return this.pancakeswap.getWalletAddress();
   }
 
   /**
@@ -1010,6 +1178,34 @@ export class TradingService {
       totalInvested,
       totalValue,
     };
+  }
+
+  /**
+   * Swap BUSD to BNB
+   */
+  async swapBUSDToBNB(amountBUSD: number, slippage: number = 5): Promise<{ txHash: string; bnbReceived: string }> {
+    if (!this.pancakeswap) {
+      throw new Error('PancakeSwap helper not initialized. Please check WALLET_MNEMONIC or WALLET_PRIVATE_KEY environment variable.');
+    }
+
+    try {
+      // Check BUSD balance
+      const busdBalance = parseFloat(await this.pancakeswap.getBUSDBalance());
+      if (busdBalance < amountBUSD) {
+        throw new Error(`Insufficient BUSD balance. Have ${busdBalance.toFixed(2)} BUSD, need ${amountBUSD.toFixed(2)} BUSD.`);
+      }
+
+      // Execute swap
+      const result = await this.pancakeswap.swapBUSDToBNB(amountBUSD, slippage);
+      
+      return {
+        txHash: result.txHash,
+        bnbReceived: result.amountOut,
+      };
+    } catch (error: any) {
+      logger.error(`Error swapping BUSD to BNB: ${error.message}`);
+      throw error;
+    }
   }
 }
 

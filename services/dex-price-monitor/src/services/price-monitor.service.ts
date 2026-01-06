@@ -89,8 +89,11 @@ export class PriceMonitorService {
         highestPrice = currentPrice;
       }
 
-      // Calculate profit floor
-      const profitFloor = calculateProfitFloor(highestPrice);
+      // Get invested amount for profit floor calculation
+      const investAmount = parseFloat(position.amount_usd_invested) || 10;
+
+      // Calculate profit floor (relative to invest amount)
+      const profitFloor = calculateProfitFloor(highestPrice, investAmount);
 
       // Update database
       await pool.query(
@@ -104,7 +107,7 @@ export class PriceMonitorService {
       );
 
       // Check if should sell
-      const shouldSellFlag = shouldSell(currentPrice, highestPrice);
+      const shouldSellFlag = shouldSell(currentPrice, highestPrice, investAmount);
 
       logger.debug(
         `Position ${positionId}: Price $${currentPrice}, Highest $${highestPrice}, Floor ${profitFloor}, Sell: ${shouldSellFlag}`

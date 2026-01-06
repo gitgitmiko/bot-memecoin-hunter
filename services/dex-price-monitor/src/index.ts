@@ -5,7 +5,8 @@
 
 import dotenv from 'dotenv';
 import { PriceMonitorService } from './services/price-monitor.service';
-import { testConnection } from './config/database';
+import { TelegramNotificationService } from './services/telegram-notification.service';
+import { testConnection, pool } from './config/database';
 import { logger } from './config/logger';
 
 // TradeService will be loaded dynamically at runtime if available
@@ -17,12 +18,14 @@ dotenv.config();
 class DexPriceMonitorService {
   private priceMonitor: PriceMonitorService;
   private tradeService: any = null; // Use any to avoid type errors at compile time
+  private telegramNotification: TelegramNotificationService;
   private intervalId: NodeJS.Timeout | null = null;
   private isRunning: boolean = false;
   private readonly intervalMs: number;
 
   constructor() {
     this.priceMonitor = new PriceMonitorService();
+    this.telegramNotification = new TelegramNotificationService();
     // Default interval: 45 seconds (between 30-60)
     this.intervalMs = parseInt(process.env.PRICE_MONITOR_INTERVAL_MS || '45000');
   }
@@ -147,6 +150,40 @@ class DexPriceMonitorService {
               logger.info(
                 `✅ Auto-sell successful for position ${candidate.positionId}. TX: ${sellResult.txHash}, PnL: $${sellResult.pnl.toFixed(2)}`
               );
+
+              // Get position details from database for notification
+              try {
+                const positionResult = await pool.query(
+                  `SELECT * FROM positions WHERE id = $1`,
+                  [candidate.positionId]
+                );
+
+                if (positionResult.rows.length > 0) {
+                  const position = positionResult.rows[0];
+                  
+                  // Send Telegram notification
+                  await this.telegramNotification.notifyAutoSell({
+                    positionId: candidate.positionId,
+                    tokenAddress: position.token_address,
+                    symbol: position.symbol || undefined,
+                    chainId: position.chain_id,
+                    txHash: sellResult.txHash,
+                    pnl: sellResult.pnl,
+                    pnlPercentage: position.pnl_percentage ? parseFloat(position.pnl_percentage) : undefined,
+                    buyPrice: parseFloat(position.buy_price_usd),
+                    sellPrice: candidate.currentPrice,
+                    highestPrice: parseFloat(position.highest_price_ever),
+                    amountInvested: parseFloat(position.amount_usd_invested),
+                  });
+
+                  logger.info(`Telegram notification sent for auto-sell position ${candidate.positionId}`);
+                } else {
+                  logger.warn(`Position ${candidate.positionId} not found in database for notification`);
+                }
+              } catch (notifError: any) {
+                logger.error(`Failed to send Telegram notification for position ${candidate.positionId}: ${notifError.message}`);
+                // Don't fail the auto-sell if notification fails
+              }
               
               // Small delay between sells to avoid rate limits
               await new Promise((resolve) => setTimeout(resolve, 2000));

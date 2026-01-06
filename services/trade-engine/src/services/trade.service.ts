@@ -1,9 +1,10 @@
 /**
  * Trade Service
- * Handles BUY and SELL operations via PancakeSwap
+ * Handles BUY and SELL operations via PancakeSwap (BSC) and Jupiter (Solana)
  */
 
 import { PancakeSwapHelper, BSC_ADDRESSES } from '../../shared/libs/pancakeswap';
+import { SolanaJupiterHelper } from '../../shared/libs/solana-jupiter';
 import { PositionService } from './position.service';
 import { PositionStatus } from '../../shared/types/position.types';
 import { logger } from '../config/logger';
@@ -28,7 +29,10 @@ export interface SellParams {
 
 export class TradeService {
   private pancakeswap: PancakeSwapHelper;
+  private solanaHelper: SolanaJupiterHelper | null = null;
   private positionService: PositionService;
+  private walletKey: string;
+  private accountIndex: number;
 
   constructor(
     rpcUrl: string,
@@ -36,16 +40,29 @@ export class TradeService {
     _stablecoinAddress: string = BSC_ADDRESSES.BUSD,
     accountIndex: number = 0
   ) {
+    this.walletKey = mnemonicOrPrivateKey;
+    this.accountIndex = accountIndex;
     this.pancakeswap = new PancakeSwapHelper(rpcUrl, mnemonicOrPrivateKey, BSC_ADDRESSES.ROUTER_V2, accountIndex);
     this.positionService = new PositionService();
   }
 
   /**
-   * Get token price from DexScreener
+   * Initialize Solana helper if needed
+   */
+  private async getSolanaHelper(): Promise<SolanaJupiterHelper> {
+    if (!this.solanaHelper) {
+      const solanaRpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+      this.solanaHelper = new SolanaJupiterHelper(solanaRpcUrl, this.walletKey, this.accountIndex);
+    }
+    return this.solanaHelper;
+  }
+
+  /**
+   * Get token price from DexScreener (supports BSC and Solana)
    */
   private async getTokenPrice(
     tokenAddress: string,
-    _chainId: number = 56
+    chainId: number = 56
   ): Promise<number | null> {
     try {
       const response = await axios.get(`${DEXSCREENER_API}/${tokenAddress}`);
@@ -55,17 +72,26 @@ export class TradeService {
         return null;
       }
 
-      // Find pair on BSC
-      const bscPair = response.data.pairs.find(
-        (pair: any) => pair.chainId === 'bsc' || pair.chainId === '56'
-      );
+      let pair: any = null;
 
-      if (!bscPair?.priceUsd) {
-        logger.warn(`No BSC price found for token ${tokenAddress}`);
+      if (chainId === 999) {
+        // Solana
+        pair = response.data.pairs.find(
+          (p: any) => p.chainId === 'solana'
+        );
+      } else {
+        // BSC (default)
+        pair = response.data.pairs.find(
+          (p: any) => p.chainId === 'bsc' || p.chainId === '56'
+        );
+      }
+
+      if (!pair?.priceUsd) {
+        logger.warn(`No price found for token ${tokenAddress} on chain ${chainId}`);
         return null;
       }
 
-      return parseFloat(bscPair.priceUsd);
+      return parseFloat(pair.priceUsd);
     } catch (error) {
       logger.error(`Error fetching price for ${tokenAddress}:`, error);
       return null;
@@ -74,7 +100,7 @@ export class TradeService {
 
   /**
    * BUY Logic
-   * - Buy $10 per coin
+   * - Buy token (supports BSC and Solana)
    * - Once per coin only
    */
   async buy(params: BuyParams): Promise<{ positionId: number; txHash: string }> {
@@ -107,34 +133,94 @@ export class TradeService {
       }
 
       logger.info(
-        `Buying $${amountUsd} of token ${tokenAddress} at price $${currentPrice}`
+        `Buying $${amountUsd} of token ${tokenAddress} on chain ${chainId} at price $${currentPrice}`
       );
 
-      // Get BNB price in USD to convert USD amount to BNB
-      let bnbPriceUSD = 0;
-      try {
-        const axios = (await import('axios')).default;
-        const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=binancecoin&vs_currencies=usd', {
-          timeout: 5000,
-        });
-        if (response.data?.binancecoin?.usd) {
-          bnbPriceUSD = response.data.binancecoin.usd;
+      let swapResult: any;
+
+      // Handle different chains
+      if (chainId === 999) {
+        // Solana
+        const solanaHelper = await this.getSolanaHelper();
+        
+        // Get SOL price in USD to convert USD amount to SOL
+        let solPriceUSD = 0;
+        try {
+          const axios = (await import('axios')).default;
+          const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd', {
+            timeout: 5000,
+          });
+          if (response.data?.solana?.usd) {
+            solPriceUSD = response.data.solana.usd;
+          }
+        } catch (error: any) {
+          logger.warn(`Failed to fetch SOL price from CoinGecko: ${error.message}. Using fallback price 100 USD`);
+          solPriceUSD = 100; // Fallback approximate SOL price
         }
-      } catch (error: any) {
-        logger.warn(`Failed to fetch BNB price from CoinGecko: ${error.message}. Using fallback price 300 USD`);
-        bnbPriceUSD = 300; // Fallback approximate BNB price
+
+        // Convert USD amount to SOL amount
+        const amountSOL = amountUsd / solPriceUSD;
+        logger.info(`Converting $${amountUsd} to ${amountSOL.toFixed(8)} SOL (SOL price: $${solPriceUSD})`);
+
+        // Execute swap via Jupiter using SOL
+        swapResult = await solanaHelper.swapSOLForToken(
+          tokenAddress,
+          amountSOL,
+          slippage
+        );
+      } else {
+        // BSC (default)
+        // Get BNB price in USD to convert USD amount to BNB
+        let bnbPriceUSD = 0;
+        try {
+          const axios = (await import('axios')).default;
+          const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=binancecoin&vs_currencies=usd', {
+            timeout: 5000,
+          });
+          if (response.data?.binancecoin?.usd) {
+            bnbPriceUSD = response.data.binancecoin.usd;
+          }
+        } catch (error: any) {
+          logger.warn(`Failed to fetch BNB price from CoinGecko: ${error.message}. Using fallback price 300 USD`);
+          bnbPriceUSD = 300; // Fallback approximate BNB price
+        }
+
+        // Convert USD amount to BNB amount
+        const amountBNB = amountUsd / bnbPriceUSD;
+        logger.info(`Converting $${amountUsd} to ${amountBNB.toFixed(8)} BNB (BNB price: $${bnbPriceUSD})`);
+
+        // Check BNB balance and swap BUSD to BNB if needed
+        const currentBNBBalance = parseFloat(await this.pancakeswap.getBNBBalance());
+        const requiredBNB = amountBNB + 0.01; // Add 0.01 BNB buffer for gas fees
+        
+        if (currentBNBBalance < requiredBNB) {
+          logger.info(`BNB balance (${currentBNBBalance.toFixed(8)}) is insufficient. Required: ${requiredBNB.toFixed(8)}. Checking BUSD balance...`);
+          
+          // Check BUSD balance
+          const busdBalance = parseFloat(await this.pancakeswap.getBUSDBalance());
+          const neededBNB = requiredBNB - currentBNBBalance;
+          const neededBUSD = neededBNB * bnbPriceUSD;
+          
+          if (busdBalance >= neededBUSD) {
+            logger.info(`Swapping ${neededBUSD.toFixed(2)} BUSD to BNB...`);
+            const swapResult = await this.pancakeswap.swapBUSDToBNB(neededBUSD, slippage);
+            logger.info(`BUSD to BNB swap successful: ${swapResult.txHash}. New BNB balance should be sufficient.`);
+          } else {
+            throw new Error(
+              `Insufficient balance. Need ${requiredBNB.toFixed(8)} BNB but only have ${currentBNBBalance.toFixed(8)} BNB. ` +
+              `Also need ${neededBUSD.toFixed(2)} BUSD but only have ${busdBalance.toFixed(2)} BUSD. ` +
+              `Please add more BNB or BUSD to your wallet.`
+            );
+          }
+        }
+
+        // Execute swap via PancakeSwap using BNB
+        swapResult = await this.pancakeswap.swapExactBNBForTokens(
+          tokenAddress,
+          amountBNB,
+          slippage
+        );
       }
-
-      // Convert USD amount to BNB amount
-      const amountBNB = amountUsd / bnbPriceUSD;
-      logger.info(`Converting $${amountUsd} to ${amountBNB.toFixed(8)} BNB (BNB price: $${bnbPriceUSD})`);
-
-      // Execute swap via PancakeSwap using BNB
-      const swapResult = await this.pancakeswap.swapExactBNBForTokens(
-        tokenAddress,
-        amountBNB,
-        slippage
-      );
 
       // Create position record
       const positionId = await this.positionService.createPosition({
@@ -181,18 +267,54 @@ export class TradeService {
         throw new Error(`Position ${positionId} is already closed`);
       }
 
-      logger.info(`Selling position ${positionId} for token ${position.tokenAddress}`);
+      logger.info(`Selling position ${positionId} for token ${position.tokenAddress} on chain ${position.chainId}`);
 
-      // Execute swap (sell token for BUSD)
-      const swapResult = await this.pancakeswap.swapExactTokensForETH(
-        position.tokenAddress,
-        position.amountToken,
-        BSC_ADDRESSES.BUSD,
-        slippage
-      );
+      let swapResult: any;
+      let sellPriceUsd: number;
+
+      // Handle different chains
+      if (position.chainId === 999) {
+        // Solana - sell token for SOL
+        const solanaHelper = await this.getSolanaHelper();
+        
+        // Get SOL price to calculate USD value
+        let solPriceUSD = 0;
+        try {
+          const axios = (await import('axios')).default;
+          const response = await axios.get('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd', {
+            timeout: 5000,
+          });
+          if (response.data?.solana?.usd) {
+            solPriceUSD = response.data.solana.usd;
+          }
+        } catch (error: any) {
+          logger.warn(`Failed to fetch SOL price: ${error.message}. Using fallback price 100 USD`);
+          solPriceUSD = 100;
+        }
+
+        // Execute swap via Jupiter (Token -> SOL)
+        swapResult = await solanaHelper.swapTokenForSOL(
+          position.tokenAddress,
+          position.amountToken,
+          slippage
+        );
+
+        // Calculate USD value from SOL received
+        sellPriceUsd = parseFloat(swapResult.amountOut) * solPriceUSD;
+      } else {
+        // BSC - sell token for BUSD
+        swapResult = await this.pancakeswap.swapExactTokensForETH(
+          position.tokenAddress,
+          position.amountToken,
+          BSC_ADDRESSES.BUSD,
+          slippage
+        );
+
+        // Calculate PnL (BUSD amount is already in USD)
+        sellPriceUsd = parseFloat(swapResult.amountOut);
+      }
 
       // Calculate PnL
-      const sellPriceUsd = parseFloat(swapResult.amountOut);
       const pnl = sellPriceUsd - position.amountUsdInvested;
       const pnlPercentage = ((sellPriceUsd - position.amountUsdInvested) / position.amountUsdInvested) * 100;
 
@@ -241,8 +363,11 @@ export class TradeService {
         highestPrice = currentPrice;
       }
 
+      // Get invested amount for profit floor calculation
+      const investAmount = position.amountUsdInvested || 10;
+
       // Update position with new prices
-      const profitFloor = calculateProfitFloor(highestPrice);
+      const profitFloor = calculateProfitFloor(highestPrice, investAmount);
       await this.positionService.updatePosition(positionId, {
         currentPriceUsd: currentPrice,
         highestPriceEver: highestPrice,
@@ -250,7 +375,7 @@ export class TradeService {
       });
 
       // Check if should sell
-      if (shouldSell(currentPrice, highestPrice)) {
+      if (shouldSell(currentPrice, highestPrice, investAmount)) {
         logger.info(
           `Profit floor condition met for position ${positionId}. Current: $${currentPrice}, Floor: $${profitFloor}, Highest: $${highestPrice}. Executing sell...`
         );

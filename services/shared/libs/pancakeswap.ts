@@ -122,6 +122,94 @@ export class PancakeSwapHelper {
   }
 
   /**
+   * Get BUSD balance
+   */
+  async getBUSDBalance(): Promise<string> {
+    try {
+      const busdContract = this.getTokenContract(BSC_ADDRESSES.BUSD);
+      const balance = await busdContract.balanceOf(this.wallet.address);
+      const decimals = await busdContract.decimals();
+      return ethers.formatUnits(balance, decimals);
+    } catch (error) {
+      logger.error('Error getting BUSD balance:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Swap BUSD to BNB
+   */
+  async swapBUSDToBNB(
+    amountBUSD: number,
+    slippage: number = 5,
+    deadlineMinutes: number = 20
+  ): Promise<SwapResult> {
+    try {
+      // Path: BUSD -> WBNB (WBNB is native BNB wrapped)
+      const path = [BSC_ADDRESSES.BUSD, BSC_ADDRESSES.WBNB];
+
+      // Get BUSD decimals
+      const busdDecimals = await this.getTokenDecimals(BSC_ADDRESSES.BUSD);
+      const amountIn = ethers.parseUnits(
+        amountBUSD.toString(),
+        busdDecimals
+      );
+
+      // Approve BUSD first
+      await this.approveToken(BSC_ADDRESSES.BUSD, amountBUSD.toString());
+
+      // Get expected amount out
+      const amounts = await this.getAmountsOutWithDecimals(amountIn, path);
+      const expectedAmountOut = amounts[1]; // WBNB amount
+
+      // Calculate minimum amount out with slippage
+      const slippageMultiplier = BigInt(100 - slippage);
+      const amountOutMin = (expectedAmountOut * slippageMultiplier) / BigInt(100);
+
+      // Deadline
+      const deadline = Math.floor(Date.now() / 1000) + deadlineMinutes * 60;
+
+      // Execute swap
+      logger.info(
+        `Swapping ${amountBUSD} BUSD for BNB with ${slippage}% slippage`
+      );
+
+      const tx = await this.router.swapExactTokensForETH(
+        amountIn,
+        amountOutMin,
+        path,
+        this.wallet.address,
+        deadline,
+        {
+          gasLimit: 300000,
+        }
+      );
+
+      logger.info(`Swap transaction submitted: ${tx.hash}`);
+      const receipt = await tx.wait();
+
+      if (!receipt) {
+        throw new Error('Transaction receipt not found');
+      }
+
+      logger.info(`Swap successful: ${tx.hash}`);
+
+      // Get BNB amount received (WBNB is 1:1 with BNB)
+      const bnbAmount = ethers.formatEther(amounts[1]);
+
+      return {
+        txHash: tx.hash,
+        amountIn: amountBUSD.toString(),
+        amountOut: bnbAmount,
+        tokenAmount: bnbAmount,
+      };
+    } catch (error: any) {
+      logger.error('Error in swapBUSDToBNB:', error);
+      throw new Error(`Swap BUSD to BNB failed: ${error.message || error}`);
+    }
+  }
+
+  /**
    * Get quote amount out
    */
   async getAmountsOut(
@@ -133,6 +221,22 @@ export class PancakeSwapHelper {
         ethers.parseEther(amountIn),
         path
       );
+      return amounts;
+    } catch (error) {
+      logger.error('Error getting amounts out:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get quote amount out with custom decimals
+   */
+  async getAmountsOutWithDecimals(
+    amountIn: bigint,
+    path: string[]
+  ): Promise<bigint[]> {
+    try {
+      const amounts = await this.router.getAmountsOut(amountIn, path);
       return amounts;
     } catch (error) {
       logger.error('Error getting amounts out:', error);
@@ -347,18 +451,37 @@ export class PancakeSwapHelper {
       const tokenDecimals = await this.getTokenDecimals(tokenAddress);
       const amountIn = ethers.parseUnits(tokenAmount, tokenDecimals);
 
-      // Path: Token -> BUSD/USDT
-      const path = [tokenAddress, stablecoinAddress];
-
       // Approve token first
       await this.approveToken(tokenAddress, tokenAmount);
 
-      // Get expected amount out
-      const amounts = await this.getAmountsOut(
-        ethers.formatUnits(amountIn, tokenDecimals),
-        path
-      );
-      const expectedAmountOut = amounts[1];
+      // Try path with WBNB first (most tokens pair with WBNB, not stablecoins directly)
+      // Path: Token -> WBNB -> BUSD/USDT
+      const pathWithWBNB = [tokenAddress, BSC_ADDRESSES.WBNB, stablecoinAddress];
+      const directPath = [tokenAddress, stablecoinAddress];
+      
+      let amounts: bigint[];
+      let expectedAmountOut: bigint;
+      let finalPath: string[];
+      
+      try {
+        // Try WBNB path first (standard approach on PancakeSwap)
+        amounts = await this.getAmountsOutWithDecimals(amountIn, pathWithWBNB);
+        expectedAmountOut = amounts[2]; // BUSD amount (last in path)
+        finalPath = pathWithWBNB;
+        logger.info(`Using swap path: ${finalPath.join(' -> ')}`);
+      } catch (error: any) {
+        // Fallback: try direct pair if WBNB path fails
+        logger.warn(`Path with WBNB failed, trying direct pair: ${error.message}`);
+        try {
+          amounts = await this.getAmountsOutWithDecimals(amountIn, directPath);
+          expectedAmountOut = amounts[1]; // BUSD amount
+          finalPath = directPath;
+          logger.info(`Using direct swap path: ${finalPath.join(' -> ')}`);
+        } catch (directError: any) {
+          logger.error('Both WBNB path and direct pair failed');
+          throw new Error(`No valid swap path found. Token may not have liquidity pair. Original error: ${error.message}`);
+        }
+      }
 
       // Calculate minimum amount out with slippage
       const slippageMultiplier = BigInt(100 - slippage);
@@ -369,13 +492,13 @@ export class PancakeSwapHelper {
 
       // Execute swap
       logger.info(
-        `Selling ${tokenAmount} tokens ${tokenAddress} with ${slippage}% slippage`
+        `Selling ${tokenAmount} tokens ${tokenAddress} with ${slippage}% slippage via path: ${finalPath.join(' -> ')}`
       );
 
       const tx = await this.router.swapExactTokensForTokens(
         amountIn,
         amountOutMin,
-        path,
+        finalPath,
         this.wallet.address,
         deadline,
         {
@@ -394,7 +517,9 @@ export class PancakeSwapHelper {
 
       // Get USD amount received
       const stablecoinDecimals = await this.getTokenDecimals(stablecoinAddress);
-      const usdAmount = ethers.formatUnits(amounts[1], stablecoinDecimals);
+      // amounts array length depends on path length
+      const outputIndex = finalPath.length - 1;
+      const usdAmount = ethers.formatUnits(amounts[outputIndex], stablecoinDecimals);
 
       return {
         txHash: tx.hash,
@@ -404,7 +529,18 @@ export class PancakeSwapHelper {
       };
     } catch (error: any) {
       logger.error('Error in swapExactTokensForETH (sell):', error);
-      throw new Error(`Sell failed: ${error.message || error}`);
+      
+      // Provide more informative error messages
+      let errorMessage = error.message || 'Unknown error';
+      if (errorMessage.includes('execution reverted') || errorMessage.includes('require(false)')) {
+        errorMessage = 'Swap path tidak valid atau tidak ada liquidity pair. Token mungkin tidak memiliki pair dengan BUSD/WBNB.';
+      } else if (errorMessage.includes('insufficient funds') || errorMessage.includes('balance')) {
+        errorMessage = 'Saldo token tidak mencukupi untuk melakukan swap.';
+      } else if (errorMessage.includes('allowance')) {
+        errorMessage = 'Gagal approve token. Pastikan wallet memiliki cukup BNB untuk gas.';
+      }
+      
+      throw new Error(`Sell failed: ${errorMessage}`);
     }
   }
 

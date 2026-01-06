@@ -233,6 +233,10 @@ services:
       dockerfile: telegram-bot/Dockerfile
     container_name: memecoin-telegram-bot
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 1.1.1.1
     environment:
       - NODE_ENV=${NODE_ENV:-production}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
@@ -288,6 +292,10 @@ services:
       dockerfile: trade-engine/Dockerfile
     container_name: memecoin-trade-engine
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 1.1.1.1
     environment:
       - NODE_ENV=${NODE_ENV:-production}
       - POSTGRES_HOST=postgres
@@ -296,6 +304,7 @@ services:
       - POSTGRES_USER=${POSTGRES_USER:-memecoin_user}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - BSC_RPC_URL=${BSC_RPC_URL:-https://bsc-dataseed1.binance.org/}
+      - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
       - WALLET_MNEMONIC=${WALLET_MNEMONIC}
       - WALLET_PRIVATE_KEY=${WALLET_PRIVATE_KEY}
       - WALLET_ACCOUNT_INDEX=${WALLET_ACCOUNT_INDEX:-0}
@@ -303,7 +312,6 @@ services:
       - TZ=${TIMEZONE:-Asia/Jakarta}
     volumes:
       - trade_engine_logs:/app/logs
-      - ./services/trade-engine:/app
       - ./services/shared:/app/shared
     networks:
       - memecoin-network
@@ -345,6 +353,8 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - BSC_RPC_URL=${BSC_RPC_URL:-https://bsc-dataseed1.binance.org/}
       - WALLET_MNEMONIC=${WALLET_MNEMONIC}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - WALLET_PRIVATE_KEY=${WALLET_PRIVATE_KEY}
       - WALLET_ACCOUNT_INDEX=${WALLET_ACCOUNT_INDEX:-0}
       - PRICE_MONITOR_INTERVAL_MS=${PRICE_MONITOR_INTERVAL_MS:-45000}
